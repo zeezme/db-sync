@@ -1,0 +1,47 @@
+{
+  "files": [],
+  "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.web.json" }]
+}
+//Somente para instalar o shadcn
+// {
+//   "compilerOptions": {
+//     // Configurações base do Electron + Vite + React (do tsconfig.web.json)
+//     "target": "ES2022",
+//     "useDefineForClassFields": true,
+//     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+//     "module": "ESNext",
+//     "skipLibCheck": true,
+//     "moduleResolution": "bundler",
+//     "allowImportingTsExtensions": true,
+//     "isolatedModules": true,
+//     "moduleDetection": "force",
+//     "noEmit": true,
+//     "jsx": "react-jsx",
+//     "strict": true,
+//     "noUnusedLocals": true,
+//     "noUnusedParameters": true,
+//     "noFallthroughCasesInSwitch": true,
+
+//     // Configurações do Electron (do tsconfig.node.json)
+//     "composite": true,
+//     "types": ["electron-vite/node"],
+
+//     // Paths e baseUrl para aliases (essencial para shadcn CLI)
+//     "baseUrl": ".",
+//     "paths": {
+//       "@renderer/*": ["src/renderer/src/*"],
+//       "@/*": ["./src/renderer/src/*"]
+//     }
+//   },
+//   "include": [
+//     // Inclui arquivos do renderer (React components, onde shadcn vai)
+//     "src/renderer/src/env.d.ts",
+//     "src/renderer/src/**/*",
+//     "src/renderer/src/**/*.tsx",
+//     "src/preload/*.d.ts",
+//     // Inclui arquivos do main e preload (para Electron)
+//     "electron.vite.config.*",
+//     "src/main/**/*",
+//     "src/preload/**/*"
+//   ]
+// }
