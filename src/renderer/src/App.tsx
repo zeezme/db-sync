@@ -1,12 +1,22 @@
+// src/renderer/src/App.tsx
+import { useEffect, useState } from 'react'
 import ConfigSection from './pages/ConfigSection'
 import './index.css'
+import LogsWindow from './pages/LogsWindow'
 
 function App(): React.JSX.Element {
-  return (
-    <>
-      <ConfigSection />
-    </>
-  )
+  const [isLogsWindow, setIsLogsWindow] = useState(false)
+
+  useEffect(() => {
+    window.electron.ipcRenderer.on('window-type', (event, type: string) => {
+      setIsLogsWindow(type === 'logs')
+    })
+    return () => {
+      window.electron.ipcRenderer.removeAllListeners('window-type')
+    }
+  }, [])
+
+  return <>{isLogsWindow ? <LogsWindow /> : <ConfigSection />}</>
 }
 
 export default App

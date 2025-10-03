@@ -9,12 +9,16 @@ import { GenericHandlers } from './generic'
 
 let dbSync: DatabaseSync | null = null
 let mainWindow: BrowserWindow | null = null
+let logsWindow: BrowserWindow | null = null
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
+    width: 1000,
+    height: 650,
+    maximizable: false,
     show: false,
+    frame: false,
+    transparent: true,
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
@@ -25,6 +29,7 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
+    mainWindow?.webContents.send('window-type', 'main')
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -33,9 +38,64 @@ function createWindow(): void {
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL']).catch((err) => {
+      console.error('Failed to load main window URL:', err)
+    })
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html')).catch((err) => {
+      console.error('Failed to load main window file:', err)
+    })
+  }
+}
+
+function createLogsWindow(): void {
+  if (logsWindow && !logsWindow.isDestroyed()) {
+    console.log('Focusing existing logs window')
+    logsWindow.focus()
+    return
+  }
+
+  logsWindow = new BrowserWindow({
+    width: 800,
+    height: 700,
+    maximizable: false,
+    show: false,
+    frame: false,
+    transparent: true,
+    autoHideMenuBar: true,
+    ...(process.platform === 'linux' ? { icon } : {}),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  console.log('Logs window created')
+
+  logsWindow.on('ready-to-show', () => {
+    console.log('Logs window ready to show')
+    logsWindow?.show()
+    logsWindow?.webContents.send('window-type', 'logs') // Informar que é a janela de logs
+  })
+
+  logsWindow.on('closed', () => {
+    console.log('Logs window closed')
+    logsWindow = null
+  })
+
+  // Carregar index.html sem hash, pois a navegação é controlada por IPC
+  const loadUrl =
+    is.dev && process.env['ELECTRON_RENDERER_URL']
+      ? process.env['ELECTRON_RENDERER_URL']
+      : join(__dirname, '../renderer/index.html')
+
+  console.log('Loading logs window:', loadUrl)
+  if (is.dev) {
+    logsWindow.loadURL(loadUrl).catch((err) => console.error('Failed to load logs URL:', err))
+  } else {
+    logsWindow.loadFile(loadUrl).catch((err) => console.error('Failed to load logs file:', err))
   }
 }
 
@@ -57,6 +117,17 @@ app.whenReady().then(() => {
       createWindow()
     }
   })
+})
+
+ipcMain.handle('open-logs-window', () => {
+  try {
+    console.log('Opening logs window')
+    createLogsWindow()
+    return { success: true }
+  } catch (error) {
+    console.error('Error opening logs window:', error)
+    return { success: false, error: (error as Error).message }
+  }
 })
 
 ipcMain.handle('save-config', async (_event, config: unknown) => {
@@ -87,6 +158,9 @@ ipcMain.handle('start-sync', async (_event, config: any) => {
 
     dbSync = new DatabaseSync(config, (log: string) => {
       mainWindow?.webContents.send('sync-log', log)
+      if (logsWindow && !logsWindow.isDestroyed()) {
+        logsWindow.webContents.send('sync-log', log)
+      }
     })
 
     await dbSync.startScheduled()
@@ -123,16 +197,12 @@ ipcMain.handle('trigger-sync', async () => {
 ipcMain.handle('test-connection', async (_event, connectionString: string) => {
   try {
     const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
-
     const client = new Client({
       connectionString,
       ssl: isLocal ? false : { rejectUnauthorized: false }
     })
-
     await client.connect()
-
     await client.end()
-
     return { success: true }
   } catch (error) {
     return { success: false, error: (error as Error).message }
@@ -144,6 +214,9 @@ ipcMain.handle('run-prisma-migrations', async (_event, { backendDir, targetUrl }
     await DatabaseSync.runPrismaMigrations(backendDir, targetUrl, (log) => {
       if (mainWindow) {
         mainWindow.webContents.send('sync-log', log)
+      }
+      if (logsWindow && !logsWindow.isDestroyed()) {
+        logsWindow.webContents.send('sync-log', log)
       }
     })
     return { success: true }
@@ -160,7 +233,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   GenericHandlers.removeAll()
-
   if (dbSync) {
     dbSync.stop()
     dbSync = null

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useTransition } from 'react'
 import { useForm, FormProvider } from 'react-hook-form'
 
 import { dbSync, SyncConfig } from '../api/dbSync'
@@ -17,7 +17,8 @@ import z from 'zod'
 import { TextareaForm } from '@renderer/components/form/textAreaForm'
 import { FileSelectorForm } from '@renderer/components/form/fileSelectorForm'
 import { useToast } from '@renderer/components/provider/toastProvider'
-import { X } from 'lucide-react'
+import { Database, GitMerge, X } from 'lucide-react'
+import { Spinner } from '@renderer/components/primitive/spinner'
 
 const STORAGE_KEY = 'dbsync-config'
 
@@ -33,9 +34,7 @@ type ConfigFormData = z.infer<typeof configSchema>
 
 const ConfigSection: React.FC = () => {
   const toast = useToast()
-  const [logs, setLogs] = useState<string[]>([])
-  const [isRunning, setIsRunning] = useState(false)
-  const logsEndRef = useRef<HTMLDivElement>(null)
+  const [isPending, startTransition] = useTransition()
 
   const methods = useForm<ConfigFormData>({
     resolver: zodResolver(configSchema),
@@ -49,36 +48,6 @@ const ConfigSection: React.FC = () => {
   })
 
   const { watch, setValue, handleSubmit } = methods
-
-  // Auto-scroll para o final dos logs
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [logs])
-
-  // Escuta eventos de logs do backend (sincronização e migrations)
-  useEffect(() => {
-    const handleLog = (_event: any, log: string) => {
-      setLogs((prev) => [...prev, log])
-    }
-
-    const handleSyncStart = () => {
-      setIsRunning(true)
-    }
-
-    const handleSyncEnd = () => {
-      setIsRunning(false)
-    }
-
-    window.electron.ipcRenderer.on('sync-log', handleLog)
-    window.electron.ipcRenderer.on('sync-start', handleSyncStart)
-    window.electron.ipcRenderer.on('sync-end', handleSyncEnd)
-
-    return () => {
-      window.electron.ipcRenderer.removeListener('sync-log', handleLog)
-      window.electron.ipcRenderer.removeListener('sync-start', handleSyncStart)
-      window.electron.ipcRenderer.removeListener('sync-end', handleSyncEnd)
-    }
-  }, [])
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY)
@@ -114,87 +83,112 @@ const ConfigSection: React.FC = () => {
     return () => subscription.unsubscribe()
   }, [watch])
 
-  const saveConfig = handleSubmit((data) => {
-    const config: SyncConfig = {
-      sourceUrl: data.sourceUrl,
-      targetUrl: data.targetUrl,
-      intervalMinutes: data.intervalMinutes,
-      excludeTables: data.excludeTables
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean)
-    }
-    dbSync.saveConfig(config)
-    toast.success('Configuração salva!')
-  })
-
   const startSync = handleSubmit((data) => {
-    const config: SyncConfig = {
-      sourceUrl: data.sourceUrl,
-      targetUrl: data.targetUrl,
-      intervalMinutes: data.intervalMinutes,
-      excludeTables: data.excludeTables
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean)
-    }
-    dbSync.startSync(config)
-  })
+    startTransition(async () => {
+      const config: SyncConfig = {
+        sourceUrl: data.sourceUrl,
+        targetUrl: data.targetUrl,
+        intervalMinutes: data.intervalMinutes,
+        excludeTables: data.excludeTables
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+      }
 
-  const stopSync = () => dbSync.stopSync()
-  const triggerSync = () => dbSync.triggerSync()
+      openLogsWindow()
+
+      await dbSync.startSync(config)
+    })
+  })
 
   const testConnection = (type: 'source' | 'target') => {
-    const url = type === 'source' ? watch('sourceUrl') : watch('targetUrl')
-    const label = type === 'source' ? 'origem' : 'destino'
+    startTransition(async () => {
+      const url = type === 'source' ? watch('sourceUrl') : watch('targetUrl')
+      const label = type === 'source' ? 'origem' : 'destino'
 
-    dbSync.testConnection(url).then((res) => {
-      if (res.success) {
-        toast.success(`Conexão ${label} OK!`)
-      } else {
-        toast.error(`Erro na conexão ${label}: ${res.error}`)
+      try {
+        const res = await dbSync.testConnection(url)
+        if (res.success) {
+          toast.success(`Conexão ${label} OK!`)
+        } else {
+          toast.error(`Erro na conexão ${label}: ${res.error}`)
+        }
+      } catch (error) {
+        toast.error(`Erro ao testar conexão ${label}: ${error}`)
       }
     })
   }
 
-  const runMigrations = async () => {
-    const { backendDir, targetUrl } = watch()
+  const runMigrations = () => {
+    startTransition(async () => {
+      const { backendDir, targetUrl } = watch()
 
-    if (!backendDir) {
-      toast.warning('Informe o diretório do backend')
-      return
-    }
+      openLogsWindow()
 
-    toast.info('Aplicando migrations...')
+      if (!backendDir) {
+        toast.warning('Informe o diretório do backend')
+        return
+      }
 
-    const res = await window.electron.ipcRenderer.invoke('run-prisma-migrations', {
-      backendDir,
-      targetUrl
+      toast.info('Aplicando migrations...')
+
+      try {
+        const res = await window.electron.ipcRenderer.invoke('run-prisma-migrations', {
+          backendDir,
+          targetUrl
+        })
+
+        if (res.success) {
+          toast.success('Migrations aplicadas com sucesso!')
+        } else {
+          toast.error(`Erro ao aplicar migrations: ${res.error}`)
+        }
+      } catch (error) {
+        toast.error(`Erro ao executar migrations: ${error}`)
+      }
     })
-
-    if (res.success) {
-      toast.success('Migrations aplicadas com sucesso!')
-    } else {
-      toast.error(`Erro ao aplicar migrations: ${res.error}`)
-    }
   }
 
-  const clearLogs = () => {
-    setLogs([])
+  const openLogsWindow = () => {
+    startTransition(async () => {
+      try {
+        await window.electron.ipcRenderer.invoke('open-logs-window')
+      } catch (error) {
+        toast.error(`Erro ao abrir janela de logs: ${error}`)
+      }
+    })
+  }
+
+  const handleCloseWindow = () => {
+    startTransition(async () => {
+      try {
+        await window.electron.ipcRenderer.invoke('close-window')
+      } catch (error) {
+        toast.error(`Erro ao fechar janela: ${error}`)
+      }
+    })
   }
 
   return (
     <FormProvider {...methods}>
-      <div className="flex gap-4 overflow-auto h-[650px] w-full">
+      <div className="flex gap-4 overflow-auto h-[650px] w-[1000px]">
         <Card className="w-full">
-          <CardHeader>
+          <CardHeader style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
             <div className="flex justify-between items-center">
-              <CardTitle>⚙️ Configurações</CardTitle>
+              <CardTitle>
+                <div className="flex items-center gap-2">
+                  <Database className="text-green-600" />
+                  <GitMerge className="text-green-600" />
+                  <p className="text-xl text-green-600">Windel Sync</p>
+                </div>
+              </CardTitle>
 
               <Button
                 variant="ghost"
                 className="hover:bg-transparent text-red-500 hover:text-red-700 hover:scale-105"
-                onClick={async () => await window.electron.ipcRenderer.invoke('close-window')}
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                onClick={handleCloseWindow}
+                disabled={isPending}
               >
                 <X />
               </Button>
@@ -209,8 +203,12 @@ const ConfigSection: React.FC = () => {
                 placeholder="postgresql://user:pass@host:5432/database"
               />
 
-              <Button variant="outline" onClick={() => testConnection('source')}>
-                Testar Conexão
+              <Button
+                variant="outline"
+                onClick={() => testConnection('source')}
+                disabled={isPending}
+              >
+                {isPending ? <Spinner /> : 'Testar Conexão'}
               </Button>
             </div>
 
@@ -221,8 +219,12 @@ const ConfigSection: React.FC = () => {
                 placeholder="postgresql://user:pass@localhost:5432/database"
               />
 
-              <Button variant="outline" onClick={() => testConnection('target')}>
-                Testar Conexão
+              <Button
+                variant="outline"
+                onClick={() => testConnection('target')}
+                disabled={isPending}
+              >
+                {isPending ? <Spinner /> : 'Testar Conexão'}
               </Button>
             </div>
 
@@ -253,53 +255,18 @@ const ConfigSection: React.FC = () => {
           </CardContent>
 
           <CardFooter className="flex flex-wrap gap-2">
-            <Button onClick={saveConfig}>💾 Salvar Configuração</Button>
-
-            <Button variant="secondary" onClick={startSync}>
-              ▶️ Iniciar Sincronização
+            <Button variant="outline" onClick={startSync} disabled={isPending}>
+              {isPending ? <Spinner /> : '▶️ Iniciar Pull'}
             </Button>
 
-            <Button variant="destructive" onClick={stopSync}>
-              ⏹️ Parar
+            <Button variant="outline" onClick={runMigrations} disabled={isPending}>
+              {isPending ? <Spinner /> : '🛠️ Rodar Migrations'}
             </Button>
 
-            <Button variant="outline" onClick={triggerSync}>
-              ⚡ Sincronizar Agora
-            </Button>
-
-            <Button variant="secondary" onClick={runMigrations} disabled={isRunning}>
-              🛠️ Rodar Migrations
+            <Button variant="outline" onClick={openLogsWindow} disabled={isPending}>
+              {isPending ? <Spinner /> : '📋 Abrir Logs'}
             </Button>
           </CardFooter>
-        </Card>
-
-        <Card className="flex flex-col w-full">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-base font-medium">
-              📋 Logs
-              {isRunning && (
-                <span className="ml-2 text-sm text-blue-500 animate-pulse">• Executando...</span>
-              )}
-            </CardTitle>
-            <Button size="sm" variant="outline" onClick={clearLogs}>
-              🗑️ Limpar
-            </Button>
-          </CardHeader>
-
-          <CardContent className="p-0">
-            <div className="h-[400px] overflow-y-auto bg-slate-950 text-green-400 font-mono text-xs p-4 rounded-b-lg">
-              {logs.length === 0 ? (
-                <div className="text-slate-500 italic">Aguardando operações...</div>
-              ) : (
-                logs.map((log, index) => (
-                  <div key={index} className="whitespace-pre-wrap break-words mb-1">
-                    {log}
-                  </div>
-                ))
-              )}
-              <div ref={logsEndRef} />
-            </div>
-          </CardContent>
         </Card>
       </div>
     </FormProvider>

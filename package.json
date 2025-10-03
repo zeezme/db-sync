@@ -34,6 +34,7 @@
     "jotai": "^2.15.0",
     "lucide-react": "^0.544.0",
     "pg": "^8.16.3",
+    "pg-copy-streams": "^7.0.0",
     "react-hook-form": "^7.63.0",
     "tailwind-merge": "^3.3.1",
     "zod": "^4.1.11"

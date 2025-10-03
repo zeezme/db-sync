@@ -3,6 +3,7 @@ import { useFormContext } from 'react-hook-form'
 import { cn } from '@renderer/lib/utils'
 import { Folder, File } from 'lucide-react'
 import { Button } from '@renderer/components/primitive/button'
+import { Input } from '../primitive/input'
 
 interface FileSelectorFormProps extends Omit<React.ComponentProps<'input'>, 'name' | 'type'> {
   name: string
@@ -64,7 +65,7 @@ function FileSelectorForm({
       )}
 
       <div className="flex gap-2">
-        <input
+        <Input
           id={name}
           type="text"
           readOnly
@@ -92,9 +93,10 @@ function FileSelectorForm({
           size={buttonSize}
           onClick={handleSelect}
           disabled={disabled}
-          className="shrink-0"
+          className="h-full"
         >
-          <Icon className="mr-2 h-4 w-4" />
+          <Icon className="mr-2" />
+
           {defaultButtonText}
         </Button>
       </div>
