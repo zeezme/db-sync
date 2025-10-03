@@ -112,7 +112,10 @@ export class DatabaseSync {
         ? `[${this.progressInfo.percentage}% - ${this.progressInfo.completedTables}/${this.progressInfo.totalTables}] `
         : ''
     const logMessage = `[${timestamp}] ${progressMsg}${message}`
-    console.log(logMessage)
+
+    // Debug para ver quantas vezes é chamado
+    console.log(`[LOG-CALL] Chamando logCallback: "${message.substring(0, 50)}..."`)
+
     this.logCallback(logMessage)
   }
 
@@ -281,32 +284,46 @@ export class DatabaseSync {
 
     try {
       this.log(`Analisando dependências para ${tables.length} tabelas...`)
+      this.log(`Tabelas: ${tables.join(', ')}`)
 
-      // Buscar TODAS as FKs entre as tabelas
+      // Buscar TODAS as FKs (incluindo externas)
       const result = await client.query(
         `
-        SELECT DISTINCT
-          tc.table_name as source_table,
-          ccu.table_name as target_table
-        FROM information_schema.table_constraints AS tc
-        JOIN information_schema.key_column_usage AS kcu
-          ON tc.constraint_name = kcu.constraint_name
-          AND tc.table_schema = kcu.table_schema
-        JOIN information_schema.constraint_column_usage AS ccu
-          ON ccu.constraint_name = tc.constraint_name
-          AND ccu.table_schema = tc.table_schema
-        WHERE tc.constraint_type = 'FOREIGN KEY'
-        AND tc.table_schema = 'public'
-        AND tc.table_name = ANY($1::text[])
-        AND ccu.table_name = ANY($1::text[])
-        `,
+      SELECT DISTINCT
+        tc.table_name as source_table,
+        ccu.table_name as target_table,
+        tc.constraint_name as constraint_name
+      FROM information_schema.table_constraints AS tc
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage AS ccu
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+      AND tc.table_schema = 'public'
+      AND tc.table_name = ANY($1::text[])
+      ORDER BY tc.table_name, ccu.table_name
+      `,
         [tables]
       )
 
       this.log(`Encontradas ${result.rows.length} dependências de FK`)
 
+      // Log de TODAS as FKs encontradas
+      if (result.rows.length > 0) {
+        this.log('\n=== TODAS AS FKs DETECTADAS ===')
+        result.rows.forEach((row) => {
+          const isInternal = tables.includes(row.target_table)
+          const marker = isInternal ? '✓' : '⚠️ EXTERNA'
+          this.log(`  ${marker} ${row.source_table} → ${row.target_table} (${row.constraint_name})`)
+        })
+        this.log('================================\n')
+      }
+
       // Criar mapa de dependências
       const dependencyMap = new Map<string, string[]>()
+      const externalDependencies = new Set<string>()
 
       // Inicializar todas as tabelas
       tables.forEach((table) => {
@@ -316,20 +333,35 @@ export class DatabaseSync {
       // Preencher dependências
       for (const row of result.rows) {
         if (row.source_table !== row.target_table) {
-          const currentDeps = dependencyMap.get(row.source_table) || []
-          if (!currentDeps.includes(row.target_table)) {
-            currentDeps.push(row.target_table)
-            dependencyMap.set(row.source_table, currentDeps)
+          // Verificar se é dependência externa
+          if (!tables.includes(row.target_table)) {
+            externalDependencies.add(`${row.source_table} → ${row.target_table}`)
+            this.log(
+              `⚠️  AVISO: ${row.source_table} depende de ${row.target_table} que NÃO está sendo sincronizada!`
+            )
+          } else {
+            // Dependência interna válida
+            const currentDeps = dependencyMap.get(row.source_table) || []
+            if (!currentDeps.includes(row.target_table)) {
+              currentDeps.push(row.target_table)
+              dependencyMap.set(row.source_table, currentDeps)
+            }
           }
         }
       }
 
-      // Log das dependências encontradas
+      // Avisar sobre dependências externas
+      if (externalDependencies.size > 0) {
+        this.log(`\n⚠️  ${externalDependencies.size} dependências externas detectadas!`)
+        this.log('Isso pode causar erros de FK. Considere adicionar essas tabelas ao sync.\n')
+      }
+
+      // Log das dependências internas
       let hasDependencies = false
       dependencyMap.forEach((deps, table) => {
         if (deps.length > 0) {
           if (!hasDependencies) {
-            this.log('Dependências encontradas:')
+            this.log('Dependências INTERNAS encontradas:')
             hasDependencies = true
           }
           this.log(`  ${table} → ${deps.join(', ')}`)
@@ -337,7 +369,7 @@ export class DatabaseSync {
       })
 
       if (!hasDependencies) {
-        this.log('Nenhuma dependência encontrada entre as tabelas')
+        this.log('Nenhuma dependência interna encontrada entre as tabelas')
       }
 
       // Converter para array de TableDependency
@@ -355,11 +387,49 @@ export class DatabaseSync {
         return a.table.localeCompare(b.table)
       })
 
-      this.log('Ordem de sincronização calculada:')
+      this.log('\n=== ORDEM DE SINCRONIZAÇÃO CALCULADA ===')
       sorted.forEach((dep, index) => {
         const depsStr = dep.dependsOn.length > 0 ? ` (depende de: ${dep.dependsOn.join(', ')})` : ''
         this.log(`  ${index + 1}. ${dep.table} [nível ${dep.depth}]${depsStr}`)
       })
+
+      // Verificação específica para empresa e configuracaoEtiqueta
+      this.log('\n=== VERIFICAÇÃO ESPECÍFICA ===')
+      const empresa = sorted.find((d) => d.table === 'empresa')
+      const config = sorted.find((d) => d.table === 'configuracaoEtiqueta')
+
+      if (empresa) {
+        this.log(
+          `✓ empresa encontrada: depth=${empresa.depth}, depende de [${empresa.dependsOn.join(', ') || 'nenhuma'}]`
+        )
+      } else {
+        this.log(`✗ empresa NÃO encontrada na lista de tabelas a sincronizar!`)
+      }
+
+      if (config) {
+        this.log(
+          `✓ configuracaoEtiqueta encontrada: depth=${config.depth}, depende de [${config.dependsOn.join(', ') || 'nenhuma'}]`
+        )
+      } else {
+        this.log(`✗ configuracaoEtiqueta NÃO encontrada na lista de tabelas a sincronizar!`)
+      }
+
+      if (empresa && config) {
+        if (empresa.depth < config.depth) {
+          this.log(
+            `✓ ORDEM CORRETA: empresa (${empresa.depth}) será processada ANTES de configuracaoEtiqueta (${config.depth})`
+          )
+        } else if (empresa.depth === config.depth) {
+          this.log(
+            `⚠️  MESMO NÍVEL: empresa e configuracaoEtiqueta estão no nível ${empresa.depth} - podem ter race condition!`
+          )
+        } else {
+          this.log(
+            `✗ ORDEM ERRADA: configuracaoEtiqueta (${config.depth}) será processada ANTES de empresa (${empresa.depth})!`
+          )
+        }
+      }
+      this.log('================================\n')
 
       return sorted
     } catch (error) {
@@ -922,6 +992,7 @@ export class DatabaseSync {
 
     this.isRunning = true
     const startTime = Date.now()
+    let targetClient: Client | null = null
 
     try {
       this.updateProgress('', 0, 0, 'starting', 'iniciando sincronização')
@@ -930,60 +1001,106 @@ export class DatabaseSync {
       // Validação pré-sincronização
       await this.preSyncValidation()
 
-      // Obter tabelas
-      this.updateProgress('', 0, 0, 'processing', 'obtendo lista de tabelas')
-      const tables = await this.getTables()
+      // Conectar ao banco target
+      targetClient = await this.createClient(this.config.targetUrl)
 
-      if (tables.length === 0) {
-        this.log('Nenhuma tabela para sincronizar')
-        return
-      }
+      // Desabilitar ALL triggers em TODAS as tabelas
+      this.log('Desabilitando triggers de foreign key em todas as tabelas...')
 
-      // Analisar dependências
-      this.updateProgress('', 0, 0, 'processing', 'analisando dependências')
-      const dependencies = await this.getTableDependencies(tables)
+      // Obter lista de tabelas do target
+      const tablesResult = await targetClient.query(`
+      SELECT tablename
+      FROM pg_tables
+      WHERE schemaname = 'public'
+    `)
 
-      this.updateProgress('', 0, tables.length, 'processing', 'iniciando sync')
-      let successCount = 0
+      const allTables = tablesResult.rows.map((row) => row.tablename)
 
-      // Processar tabelas em ordem de dependência
-      const maxDepth = Math.max(...dependencies.map((d) => d.depth))
-
-      for (let depth = 0; depth <= maxDepth; depth++) {
-        const tablesAtDepth = dependencies
-          .filter((dep) => dep.depth === depth)
-          .map((dep) => dep.table)
-
-        if (tablesAtDepth.length === 0) continue
-
-        this.log(`Processando nível ${depth} (${tablesAtDepth.length} tabelas)`)
-
-        // Processar em batches
-        const batchSize = this.config.maxParallelTables!
-        for (let i = 0; i < tablesAtDepth.length; i += batchSize) {
-          const batch = tablesAtDepth.slice(i, i + batchSize)
-
-          const currentIndex = dependencies.findIndex((dep) => dep.table === batch[0])
-          const batchSuccess = await this.processTableBatch(batch, currentIndex, tables.length)
-          successCount += batchSuccess
-
-          // Pequena pausa entre batches
-          if (i + batchSize < tablesAtDepth.length) {
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-          }
+      // Desabilitar triggers em cada tabela
+      for (const table of allTables) {
+        try {
+          await targetClient.query(`ALTER TABLE "${table}" DISABLE TRIGGER ALL;`)
+        } catch (error) {
+          this.log(`Aviso: não foi possível desabilitar triggers em ${table}: ${error}`)
         }
       }
 
-      const duration = ((Date.now() - startTime) / 1000).toFixed(2)
-      this.updateProgress('', tables.length, tables.length, 'completed')
-      this.log(
-        `=== SINCRONIZAÇÃO CONCLUÍDA: ${successCount}/${tables.length} tabelas em ${duration}s ===`
-      )
+      this.log(`✓ Triggers desabilitados em ${allTables.length} tabelas`)
+
+      try {
+        // Obter tabelas para sincronizar
+        this.updateProgress('', 0, 0, 'processing', 'obtendo lista de tabelas')
+        const tables = await this.getTables()
+
+        if (tables.length === 0) {
+          this.log('Nenhuma tabela para sincronizar')
+          return
+        }
+
+        // Analisar dependências
+        this.updateProgress('', 0, 0, 'processing', 'analisando dependências')
+        const dependencies = await this.getTableDependencies(tables)
+
+        this.updateProgress('', 0, tables.length, 'processing', 'iniciando sync')
+        let successCount = 0
+
+        // Processar tabelas em ordem de dependência
+        const maxDepth = Math.max(...dependencies.map((d) => d.depth))
+
+        for (let depth = 0; depth <= maxDepth; depth++) {
+          const tablesAtDepth = dependencies
+            .filter((dep) => dep.depth === depth)
+            .map((dep) => dep.table)
+
+          if (tablesAtDepth.length === 0) continue
+
+          this.log(`Processando nível ${depth} (${tablesAtDepth.length} tabelas)`)
+
+          // Processar em batches
+          const batchSize = this.config.maxParallelTables!
+          for (let i = 0; i < tablesAtDepth.length; i += batchSize) {
+            const batch = tablesAtDepth.slice(i, i + batchSize)
+
+            const currentIndex = dependencies.findIndex((dep) => dep.table === batch[0])
+            const batchSuccess = await this.processTableBatch(batch, currentIndex, tables.length)
+            successCount += batchSuccess
+
+            // Pequena pausa entre batches
+            if (i + batchSize < tablesAtDepth.length) {
+              await new Promise((resolve) => setTimeout(resolve, 1000))
+            }
+          }
+        }
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2)
+        this.updateProgress('', tables.length, tables.length, 'completed')
+        this.log(
+          `=== SINCRONIZAÇÃO CONCLUÍDA: ${successCount}/${tables.length} tabelas em ${duration}s ===`
+        )
+      } finally {
+        // Reabilitar triggers em todas as tabelas
+        if (targetClient) {
+          this.log('Reabilitando triggers de foreign key...')
+
+          for (const table of allTables) {
+            try {
+              await targetClient.query(`ALTER TABLE "${table}" ENABLE TRIGGER ALL;`)
+            } catch (error) {
+              this.log(`Aviso: não foi possível reabilitar triggers em ${table}: ${error}`)
+            }
+          }
+
+          this.log(`✓ Triggers reabilitados em ${allTables.length} tabelas`)
+        }
+      }
     } catch (error) {
       this.updateProgress('', 0, 0, 'error')
       this.log(`=== ERRO NA SINCRONIZAÇÃO: ${error} ===`)
       throw error
     } finally {
+      if (targetClient) {
+        await targetClient.end().catch(() => {})
+      }
       this.isRunning = false
     }
   }

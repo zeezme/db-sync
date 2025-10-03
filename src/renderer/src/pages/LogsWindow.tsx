@@ -8,33 +8,41 @@ const LogsWindow: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false)
   const logsEndRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll para o final dos logs
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [logs])
 
-  // Escuta eventos de logs do backend
   useEffect(() => {
+    console.log('[FRONTEND] Configurando listeners de log')
+
     const handleLog = (_event: any, log: string) => {
+      console.log('[FRONTEND] Log recebido:', log.substring(0, 100))
       setLogs((prev) => [...prev, log])
     }
 
     const handleSyncStart = () => {
+      console.log('[FRONTEND] Sync iniciado')
       setIsRunning(true)
     }
 
     const handleSyncEnd = () => {
+      console.log('[FRONTEND] Sync finalizado')
       setIsRunning(false)
     }
+
+    window.electron.ipcRenderer.removeAllListeners('sync-log')
+    window.electron.ipcRenderer.removeAllListeners('sync-start')
+    window.electron.ipcRenderer.removeAllListeners('sync-end')
 
     window.electron.ipcRenderer.on('sync-log', handleLog)
     window.electron.ipcRenderer.on('sync-start', handleSyncStart)
     window.electron.ipcRenderer.on('sync-end', handleSyncEnd)
 
     return () => {
-      window.electron.ipcRenderer.removeListener('sync-log', handleLog)
-      window.electron.ipcRenderer.removeListener('sync-start', handleSyncStart)
-      window.electron.ipcRenderer.removeListener('sync-end', handleSyncEnd)
+      console.log('[FRONTEND] Removendo listeners de log')
+      window.electron.ipcRenderer.removeAllListeners('sync-log')
+      window.electron.ipcRenderer.removeAllListeners('sync-start')
+      window.electron.ipcRenderer.removeAllListeners('sync-end')
     }
   }, [])
 
