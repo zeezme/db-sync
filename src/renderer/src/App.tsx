@@ -1,4 +1,3 @@
-// src/renderer/src/App.tsx
 import { useEffect, useState } from 'react'
 import ConfigSection from './pages/ConfigSection'
 import './index.css'

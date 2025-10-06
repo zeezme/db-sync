@@ -20,6 +20,12 @@ if (process.contextIsolated) {
         ipcRenderer.on('sync-log', (_event, log) => callback(log))
       }
     })
+    contextBridge.exposeInMainWorld('logsManager', {
+      saveLogs: (log: string) => ipcRenderer.invoke('save-log', log),
+      getLogs: () => ipcRenderer.invoke('get-logs'),
+      clearLogs: () => ipcRenderer.invoke('clear-logs'),
+      setSyncStatus: (status: boolean) => ipcRenderer.invoke('set-sync-status', status)
+    })
     contextBridge.exposeInMainWorld('windowControls', {
       close: () => ipcRenderer.invoke('close-window')
     })

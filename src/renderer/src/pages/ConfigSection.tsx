@@ -1,4 +1,4 @@
-import React, { useEffect, useTransition } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useForm, FormProvider } from 'react-hook-form'
 
 import { dbSync, SyncConfig } from '../api/dbSync'
@@ -14,11 +14,11 @@ import { InputForm } from '@renderer/components/form/inputForm'
 import { zodResolver } from '@hookform/resolvers/zod'
 
 import z from 'zod'
-import { TextareaForm } from '@renderer/components/form/textAreaForm'
 import { FileSelectorForm } from '@renderer/components/form/fileSelectorForm'
 import { useToast } from '@renderer/components/provider/toastProvider'
 import { Database, GitMerge, X } from 'lucide-react'
 import { Spinner } from '@renderer/components/primitive/spinner'
+import { InputListForm } from '@renderer/components/form/inputListForm'
 
 const STORAGE_KEY = 'dbsync-config'
 
@@ -34,7 +34,13 @@ type ConfigFormData = z.infer<typeof configSchema>
 
 const ConfigSection: React.FC = () => {
   const toast = useToast()
-  const [isPending, startTransition] = useTransition()
+
+  const [loadingSourceTest, setLoadingSourceTest] = useState(false)
+  const [loadingTargetTest, setLoadingTargetTest] = useState(false)
+  const [loadingSync, setLoadingSync] = useState(false)
+  const [loadingMigrations, setLoadingMigrations] = useState(false)
+  const [loadingLogs, setLoadingLogs] = useState(false)
+  const [loadingClose, setLoadingClose] = useState(false)
 
   const methods = useForm<ConfigFormData>({
     resolver: zodResolver(configSchema),
@@ -83,8 +89,23 @@ const ConfigSection: React.FC = () => {
     return () => subscription.unsubscribe()
   }, [watch])
 
-  const startSync = handleSubmit((data) => {
-    startTransition(async () => {
+  const openLogsWindow = async () => {
+    setLoadingLogs(true)
+    try {
+      await window.electron.ipcRenderer.invoke('open-logs-window')
+    } catch (error) {
+      toast.error(`Erro ao abrir janela de logs: ${error}`)
+    } finally {
+      setLoadingLogs(false)
+    }
+  }
+
+  const startSync = handleSubmit(async (data) => {
+    setLoadingSync(true)
+
+    await openLogsWindow()
+
+    try {
       const config: SyncConfig = {
         sourceUrl: data.sourceUrl,
         targetUrl: data.targetUrl,
@@ -95,83 +116,78 @@ const ConfigSection: React.FC = () => {
           .filter(Boolean)
       }
 
-      openLogsWindow()
-
       await dbSync.startSync(config)
-    })
+    } finally {
+      setLoadingSync(false)
+    }
   })
 
-  const testConnection = (type: 'source' | 'target') => {
-    startTransition(async () => {
-      const url = type === 'source' ? watch('sourceUrl') : watch('targetUrl')
-      const label = type === 'source' ? 'origem' : 'destino'
+  const testConnection = async (type: 'source' | 'target') => {
+    const url = type === 'source' ? watch('sourceUrl') : watch('targetUrl')
+    const label = type === 'source' ? 'origem' : 'destino'
+    const setLoading = type === 'source' ? setLoadingSourceTest : setLoadingTargetTest
 
-      try {
-        const res = await dbSync.testConnection(url)
-        if (res.success) {
-          toast.success(`Conexão ${label} OK!`)
-        } else {
-          toast.error(`Erro na conexão ${label}: ${res.error}`)
-        }
-      } catch (error) {
-        toast.error(`Erro ao testar conexão ${label}: ${error}`)
+    setLoading(true)
+
+    try {
+      const res = await dbSync.testConnection(url)
+      if (res.success) {
+        toast.success(`Conexão ${label} OK!`)
+      } else {
+        toast.error(`Erro na conexão ${label}: ${res.error}`)
       }
-    })
+    } catch (error) {
+      toast.error(`Erro ao testar conexão ${label}: ${error}`)
+    } finally {
+      setLoading(false)
+    }
   }
 
-  const runMigrations = () => {
-    startTransition(async () => {
-      const { backendDir, targetUrl } = watch()
+  const runMigrations = async () => {
+    const { backendDir, targetUrl } = watch()
 
-      openLogsWindow()
+    openLogsWindow()
 
+    setLoadingMigrations(true)
+
+    try {
       if (!backendDir) {
         toast.warning('Informe o diretório do backend')
         return
       }
 
       toast.info('Aplicando migrations...')
+      const res = await window.electron.ipcRenderer.invoke('run-prisma-migrations', {
+        backendDir,
+        targetUrl
+      })
 
-      try {
-        const res = await window.electron.ipcRenderer.invoke('run-prisma-migrations', {
-          backendDir,
-          targetUrl
-        })
-
-        if (res.success) {
-          toast.success('Migrations aplicadas com sucesso!')
-        } else {
-          toast.error(`Erro ao aplicar migrations: ${res.error}`)
-        }
-      } catch (error) {
-        toast.error(`Erro ao executar migrations: ${error}`)
+      if (res.success) {
+        toast.success('Migrations aplicadas com sucesso!')
+      } else {
+        toast.error(`Erro ao aplicar migrations: ${res.error}`)
       }
-    })
+    } catch (error) {
+      toast.error(`Erro ao executar migrations: ${error}`)
+    } finally {
+      setLoadingMigrations(false)
+    }
   }
 
-  const openLogsWindow = () => {
-    startTransition(async () => {
-      try {
-        await window.electron.ipcRenderer.invoke('open-logs-window')
-      } catch (error) {
-        toast.error(`Erro ao abrir janela de logs: ${error}`)
-      }
-    })
-  }
-
-  const handleCloseWindow = () => {
-    startTransition(async () => {
-      try {
-        await window.electron.ipcRenderer.invoke('close-window')
-      } catch (error) {
-        toast.error(`Erro ao fechar janela: ${error}`)
-      }
-    })
+  const handleCloseWindow = async () => {
+    setLoadingClose(true)
+    try {
+      await window.electron.ipcRenderer.invoke('close-window')
+    } catch (error) {
+      toast.error(`Erro ao fechar janela: ${error}`)
+    } finally {
+      setLoadingClose(false)
+    }
   }
 
   return (
     <FormProvider {...methods}>
-      <div className="flex gap-4 overflow-auto h-[650px] w-[1000px]">
+      <div className="flex gap-4 overflow-auto h-screen w-screen">
         <Card className="w-full">
           <CardHeader style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
             <div className="flex justify-between items-center">
@@ -188,9 +204,9 @@ const ConfigSection: React.FC = () => {
                 className="hover:bg-transparent text-red-500 hover:text-red-700 hover:scale-105"
                 style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 onClick={handleCloseWindow}
-                disabled={isPending}
+                disabled={loadingClose}
               >
-                <X />
+                {loadingClose ? <Spinner /> : <X />}
               </Button>
             </div>
           </CardHeader>
@@ -201,14 +217,21 @@ const ConfigSection: React.FC = () => {
                 name="sourceUrl"
                 label="Banco de Origem (DEV)"
                 placeholder="postgresql://user:pass@host:5432/database"
+                disabled={loadingSync}
               />
 
               <Button
                 variant="outline"
                 onClick={() => testConnection('source')}
-                disabled={isPending}
+                disabled={loadingSourceTest || loadingSync}
               >
-                {isPending ? <Spinner /> : 'Testar Conexão'}
+                {loadingSourceTest ? (
+                  <>
+                    Testar Conexão <Spinner />
+                  </>
+                ) : (
+                  'Testar Conexão'
+                )}
               </Button>
             </div>
 
@@ -217,14 +240,21 @@ const ConfigSection: React.FC = () => {
                 name="targetUrl"
                 label="Banco de Destino (LOCAL)"
                 placeholder="postgresql://user:pass@localhost:5432/database"
+                disabled={loadingSync}
               />
 
               <Button
                 variant="outline"
                 onClick={() => testConnection('target')}
-                disabled={isPending}
+                disabled={loadingTargetTest || loadingSync}
               >
-                {isPending ? <Spinner /> : 'Testar Conexão'}
+                {loadingTargetTest ? (
+                  <>
+                    Testar Conexão <Spinner />
+                  </>
+                ) : (
+                  'Testar Conexão'
+                )}
               </Button>
             </div>
 
@@ -232,39 +262,59 @@ const ConfigSection: React.FC = () => {
               name="intervalMinutes"
               label="Intervalo de Sincronização (min)"
               type="number"
+              disabled={loadingSync}
               min={1}
               max={1440}
             />
 
-            <TextareaForm
+            <InputListForm
               name="excludeTables"
-              label="Tabelas para Excluir"
+              label="Tabelas que não serão sincronizadas"
               placeholder="Ex: migrations, schema_migrations"
-              helperText="Separe por vírgulas"
-              className="min-h-[80px] resize-none"
+              disabled={loadingSync}
             />
 
             <FileSelectorForm
               name="backendDir"
               label="Diretório do Backend"
               placeholder="/caminho/para/backend"
-              helperText="Diretório contendo o arquivo prisma/schema.prisma"
               mode="directory"
               buttonText="Procurar..."
+              disabled={loadingSync}
             />
           </CardContent>
 
           <CardFooter className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={startSync} disabled={isPending}>
-              {isPending ? <Spinner /> : '▶️ Iniciar Pull'}
+            <Button
+              variant="outline"
+              onClick={startSync}
+              disabled={loadingSync || loadingMigrations}
+            >
+              {loadingSync ? (
+                <>
+                  ▶️ Iniciar Pull <Spinner />
+                </>
+              ) : (
+                '▶️ Iniciar Pull'
+              )}
             </Button>
 
-            <Button variant="outline" onClick={runMigrations} disabled={isPending}>
-              {isPending ? <Spinner /> : '🛠️ Rodar Migrations'}
+            <Button
+              variant="outline"
+              onClick={runMigrations}
+              disabled={loadingMigrations || loadingSync}
+            >
+              {loadingMigrations ? (
+                <>
+                  🛠️ Rodar Migrations <Spinner />
+                </>
+              ) : (
+                '🛠️ Rodar Migrations'
+              )}
             </Button>
 
-            <Button variant="outline" onClick={openLogsWindow} disabled={isPending}>
-              {isPending ? <Spinner /> : '📋 Abrir Logs'}
+            <Button variant="outline" onClick={openLogsWindow} disabled={loadingLogs}>
+              {loadingLogs ? <Spinner /> : '📋 Abrir Logs'}
             </Button>
           </CardFooter>
         </Card>

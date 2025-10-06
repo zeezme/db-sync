@@ -4,5 +4,24 @@ declare global {
   interface Window {
     electron: ElectronAPI
     api: unknown
+    dbSync: {
+      saveConfig: (config: any) => Promise<any>
+      loadConfig: () => Promise<any>
+      startSync: (config: any) => Promise<any>
+      stopSync: () => Promise<any>
+      triggerSync: () => Promise<any>
+      testConnection: (url: string) => Promise<any>
+      runPrismaMigrations: (backendDir: string) => Promise<any>
+      onSyncLog: (callback: (log: string) => void) => void
+    }
+    logsManager: {
+      saveLogs: (log: string) => Promise<{ success: boolean }>
+      getLogs: () => Promise<{ logs: string[]; isRunning: boolean }>
+      clearLogs: () => Promise<{ success: boolean }>
+      setSyncStatus: (status: boolean) => Promise<{ success: boolean }>
+    }
+    windowControls: {
+      close: () => Promise<void>
+    }
   }
 }

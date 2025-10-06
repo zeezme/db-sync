@@ -33,6 +33,7 @@ linux:
     - AppImage
     - snap
     - deb
+  icon: build/icons
   maintainer: electronjs.org
   category: Utility
 appImage:

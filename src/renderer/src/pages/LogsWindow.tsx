@@ -1,33 +1,76 @@
 import React, { useEffect, useState, useRef } from 'react'
+import { X } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/primitive/card'
 import { Button } from '@renderer/components/primitive/button'
-import { X } from 'lucide-react'
 
 const LogsWindow: React.FC = () => {
   const [logs, setLogs] = useState<string[]>([])
   const [isRunning, setIsRunning] = useState(false)
-  const logsEndRef = useRef<HTMLDivElement>(null)
+  const logsContainerRef = useRef<HTMLDivElement>(null)
+  const shouldAutoScrollRef = useRef(true)
 
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const loadSavedLogs = async () => {
+      try {
+        const result = await window.logsManager.getLogs()
+        if (result) {
+          console.log('[FRONTEND] Logs recuperados:', result.logs.length)
+          setLogs(result.logs || [])
+          setIsRunning(result.isRunning || false)
+        }
+      } catch (error) {
+        console.error('[FRONTEND] Erro ao carregar logs:', error)
+      }
+    }
+
+    loadSavedLogs()
+  }, [])
+
+  useEffect(() => {
+    if (shouldAutoScrollRef.current && logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight
+    }
   }, [logs])
+
+  const handleScroll = () => {
+    if (logsContainerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = logsContainerRef.current
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 50
+      shouldAutoScrollRef.current = isNearBottom
+    }
+  }
 
   useEffect(() => {
     console.log('[FRONTEND] Configurando listeners de log')
 
-    const handleLog = (_event: any, log: string) => {
+    const handleLog = async (_event: any, log: string) => {
       console.log('[FRONTEND] Log recebido:', log.substring(0, 100))
       setLogs((prev) => [...prev, log])
+      try {
+        await window.electron.ipcRenderer.invoke('save-log', log)
+      } catch (error) {
+        console.error('[FRONTEND] Erro ao salvar log:', error)
+      }
     }
 
-    const handleSyncStart = () => {
+    const handleSyncStart = async () => {
       console.log('[FRONTEND] Sync iniciado')
       setIsRunning(true)
+      try {
+        await window.electron.ipcRenderer.invoke('set-sync-status', true)
+      } catch (error) {
+        console.error('[FRONTEND] Erro ao atualizar status:', error)
+      }
     }
 
-    const handleSyncEnd = () => {
+    const handleSyncEnd = async () => {
       console.log('[FRONTEND] Sync finalizado')
       setIsRunning(false)
+      try {
+        await window.electron.ipcRenderer.invoke('set-sync-status', false)
+      } catch (error) {
+        console.error('[FRONTEND] Erro ao atualizar status:', error)
+      }
     }
 
     window.electron.ipcRenderer.removeAllListeners('sync-log')
@@ -46,15 +89,22 @@ const LogsWindow: React.FC = () => {
     }
   }, [])
 
-  const clearLogs = () => {
+  const clearLogs = async () => {
     setLogs([])
+    shouldAutoScrollRef.current = true
+    try {
+      await window.electron.ipcRenderer.invoke('clear-logs')
+      console.log('[FRONTEND] Logs limpos')
+    } catch (error) {
+      console.error('[FRONTEND] Erro ao limpar logs:', error)
+    }
   }
 
   return (
-    <div className="w-[800px] h-[600px] p-4">
+    <div className="fixed inset-0 flex flex-col">
       <Card className="flex flex-col h-full">
         <CardHeader
-          className="flex flex-row items-center justify-between space-y-0 pb-2"
+          className="flex-shrink-0 flex flex-row items-center justify-between"
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
           <CardTitle className="text-base font-medium">
@@ -67,6 +117,7 @@ const LogsWindow: React.FC = () => {
             <Button size="sm" variant="outline" onClick={clearLogs}>
               🗑️ Limpar
             </Button>
+
             <Button
               size="sm"
               variant="ghost"
@@ -78,17 +129,39 @@ const LogsWindow: React.FC = () => {
           </div>
         </CardHeader>
 
-        <CardContent className="flex-1 p-0 overflow-hidden">
+        <CardContent className="flex-1 overflow-hidden">
           <div
-            className="h-full overflow-y-auto bg-slate-950 text-green-400 font-mono text-xs p-4 rounded-b-lg select-text"
-            style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+            ref={logsContainerRef}
+            onScroll={handleScroll}
+            className="h-full overflow-y-auto bg-slate-950 text-green-400 font-mono text-xs p-4 rounded-lg select-text"
+            style={{
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              scrollbarWidth: 'thin',
+              scrollbarColor: '#334155 #0f172a'
+            }}
           >
+            <style>{`
+              div[class*="overflow-y-auto"]::-webkit-scrollbar {
+                width: 12px;
+              }
+              div[class*="overflow-y-auto"]::-webkit-scrollbar-track {
+                background: #0f172a;
+                border-radius: 8px;
+              }
+              div[class*="overflow-y-auto"]::-webkit-scrollbar-thumb {
+                background: #334155;
+                border-radius: 8px;
+              }
+              div[class*="overflow-y-auto"]::-webkit-scrollbar-thumb:hover {
+                background: #475569;
+              }
+            `}</style>
             {logs.length === 0 ? (
               <div className="text-slate-500 italic">Aguardando operações...</div>
             ) : (
               logs.map((log, index) => <div key={index}>{log}</div>)
             )}
-            <div ref={logsEndRef} />
           </div>
         </CardContent>
       </Card>

@@ -11,19 +11,45 @@ let dbSync: DatabaseSync | null = null
 let mainWindow: BrowserWindow | null = null
 let logsWindow: BrowserWindow | null = null
 
-// Variável para controlar se os handlers já foram registrados
+let logsBuffer: string[] = []
+let isSyncRunning = false
+
 let handlersRegistered = false
 
 function registerHandlers(): void {
-  if (handlersRegistered) return
+  if (handlersRegistered) {
+    console.log('Handlers already registered, skipping...')
+    return
+  }
 
   console.log('Registering IPC handlers')
+
+  ipcMain.handle('save-log', (_event, log: string) => {
+    logsBuffer.push(log)
+    return { success: true }
+  })
+
+  ipcMain.handle('get-logs', () => {
+    console.log('Getting logs, buffer size:', logsBuffer.length)
+    return { logs: logsBuffer, isRunning: isSyncRunning }
+  })
+
+  ipcMain.handle('clear-logs', () => {
+    logsBuffer = []
+    console.log('Logs cleared')
+    return { success: true }
+  })
+
+  ipcMain.handle('set-sync-status', (_event, status: boolean) => {
+    isSyncRunning = status
+    console.log('Sync status set to:', status)
+    return { success: true }
+  })
+
   ipcMain.on('ping', () => console.log('pong'))
 
   GenericHandlers.registerAll()
 
-  // Remova handlers existentes antes de registrar novos
-  ipcMain.removeHandler('save-config')
   ipcMain.handle('save-config', async (_event, config: unknown) => {
     try {
       const configPath = join(app.getPath('userData'), 'config.json')
@@ -34,7 +60,6 @@ function registerHandlers(): void {
     }
   })
 
-  ipcMain.removeHandler('load-config')
   ipcMain.handle('load-config', async () => {
     try {
       const configPath = join(app.getPath('userData'), 'config.json')
@@ -45,41 +70,55 @@ function registerHandlers(): void {
     }
   })
 
-  ipcMain.removeHandler('start-sync')
   ipcMain.handle('start-sync', async (_event, config: any) => {
     try {
       if (dbSync) {
         dbSync.stop()
       }
 
+      isSyncRunning = true
+
+      if (logsWindow && !logsWindow.isDestroyed()) {
+        logsWindow.webContents.send('sync-start')
+      }
+
       dbSync = new DatabaseSync(config, (log: string) => {
+        logsBuffer.push(log)
+
         if (logsWindow && !logsWindow.isDestroyed()) {
           logsWindow.webContents.send('sync-log', log)
         }
-        // console.log('Sync Log:', log)
       })
 
       await dbSync.startScheduled()
       return { success: true }
     } catch (error) {
+      isSyncRunning = false
+      if (logsWindow && !logsWindow.isDestroyed()) {
+        logsWindow.webContents.send('sync-end')
+      }
       return { success: false, error: (error as Error).message }
     }
   })
 
-  ipcMain.removeHandler('stop-sync')
   ipcMain.handle('stop-sync', async () => {
     try {
       if (dbSync) {
         dbSync.stop()
         dbSync = null
       }
+      isSyncRunning = false
+
+      if (logsWindow && !logsWindow.isDestroyed()) {
+        logsWindow.webContents.send('sync-end')
+      }
+
       return { success: true }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
   })
 
-  ipcMain.removeHandler('trigger-sync')
   ipcMain.handle('trigger-sync', async () => {
     try {
       if (!dbSync) {
@@ -92,7 +131,6 @@ function registerHandlers(): void {
     }
   })
 
-  ipcMain.removeHandler('test-connection')
   ipcMain.handle('test-connection', async (_event, connectionString: string) => {
     try {
       const isLocal =
@@ -109,22 +147,37 @@ function registerHandlers(): void {
     }
   })
 
-  ipcMain.removeHandler('run-prisma-migrations')
   ipcMain.handle('run-prisma-migrations', async (_event, { backendDir, targetUrl }) => {
     try {
+      if (logsWindow && !logsWindow.isDestroyed()) {
+        logsWindow.webContents.send('sync-start')
+      }
+      isSyncRunning = true
+
       await DatabaseSync.runPrismaMigrations(backendDir, targetUrl, (log) => {
+        logsBuffer.push(log)
+
         if (logsWindow && !logsWindow.isDestroyed()) {
           logsWindow.webContents.send('sync-log', log)
         }
         console.log('Migration Log:', log)
       })
+
+      if (logsWindow && !logsWindow.isDestroyed()) {
+        logsWindow.webContents.send('sync-end')
+      }
+      isSyncRunning = false
+
       return { success: true }
     } catch (error) {
+      if (logsWindow && !logsWindow.isDestroyed()) {
+        logsWindow.webContents.send('sync-end')
+      }
+      isSyncRunning = false
       return { success: false, error: (error as Error).message }
     }
   })
 
-  ipcMain.removeHandler('open-logs-window')
   ipcMain.handle('open-logs-window', () => {
     try {
       console.log('Opening logs window')
@@ -137,6 +190,7 @@ function registerHandlers(): void {
   })
 
   handlersRegistered = true
+  console.log('All handlers registered successfully')
 }
 
 function createWindow(): void {
@@ -233,7 +287,6 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // Registrar handlers apenas uma vez
   registerHandlers()
 
   createWindow()
@@ -257,5 +310,9 @@ app.on('before-quit', () => {
     dbSync.stop()
     dbSync = null
   }
+
+  logsBuffer = []
+  isSyncRunning = false
+
   handlersRegistered = false
 })

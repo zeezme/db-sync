@@ -7,6 +7,9 @@ import { Client, ClientConfig } from 'pg'
 
 const execAsync = promisify(exec)
 
+/**
+ * Configuration interface for database synchronization
+ */
 export interface SyncConfig {
   sourceUrl: string
   targetUrl: string
@@ -15,6 +18,9 @@ export interface SyncConfig {
   maxParallelTables?: number
 }
 
+/**
+ * Progress information during synchronization
+ */
 interface ProgressInfo {
   currentTable: string
   completedTables: number
@@ -24,12 +30,18 @@ interface ProgressInfo {
   currentAction?: string
 }
 
+/**
+ * Table dependency information for ordering synchronization
+ */
 interface TableDependency {
   table: string
   dependsOn: string[]
   depth: number
 }
 
+/**
+ * Main class for handling database synchronization between PostgreSQL databases
+ */
 export class DatabaseSync {
   private config: SyncConfig
   private intervalId: NodeJS.Timeout | null = null
@@ -45,6 +57,11 @@ export class DatabaseSync {
   }
   private tempDirInitialized: boolean = false
 
+  /**
+   * Creates a new DatabaseSync instance
+   * @param config - Synchronization configuration
+   * @param logCallback - Callback function for logging messages
+   */
   constructor(config: SyncConfig, logCallback: (log: string) => void) {
     this.validateConfig(config)
 
@@ -56,6 +73,11 @@ export class DatabaseSync {
     this.tempDir = path.join(tmpdir(), 'db-sync')
   }
 
+  /**
+   * Validates the synchronization configuration
+   * @param config - Configuration to validate
+   * @throws Error if configuration is invalid
+   */
   private validateConfig(config: SyncConfig): void {
     const errors: string[] = []
 
@@ -88,6 +110,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Updates the current progress information
+   */
   private updateProgress(
     currentTable: string,
     completedTables: number,
@@ -105,6 +130,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Logs a message with timestamp and progress information
+   */
   private log(message: string) {
     const timestamp = new Date().toISOString()
     const progressMsg =
@@ -113,17 +141,16 @@ export class DatabaseSync {
         : ''
     const logMessage = `[${timestamp}] ${progressMsg}${message}`
 
-    // Debug para ver quantas vezes é chamado
-    console.log(`[LOG-CALL] Chamando logCallback: "${message.substring(0, 50)}..."`)
-
     this.logCallback(logMessage)
   }
 
+  /**
+   * Parses database connection parameters from URL
+   */
   private getConnectionParams(url: string): ClientConfig {
     try {
       const urlObj = new URL(url)
 
-      // Determinar SSL mode baseado na URL
       const isLocalhost =
         urlObj.hostname.includes('localhost') || urlObj.hostname.includes('127.0.0.1')
 
@@ -142,6 +169,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Creates a PostgreSQL client connection
+   */
   private async createClient(url: string) {
     const params = this.getConnectionParams(url)
 
@@ -158,31 +188,53 @@ export class DatabaseSync {
 
     try {
       await client.connect()
+
       clearTimeout(connectionTimeout)
+
       await client.query('SELECT 1 as connectivity_test')
+
       return client
     } catch (error) {
       clearTimeout(connectionTimeout)
+
       await client.end().catch(() => {})
+
       throw new Error(`Falha na conexão com ${url}: ${error}`)
     }
   }
 
+  /**
+   * Validates database connection
+   */
   private async validateDatabaseConnection(url: string): Promise<boolean> {
     try {
       const client = await this.createClient(url)
-      const result = await client.query(
-        'SELECT version() as db_version, current_database() as db_name'
-      )
-      this.log(`✓ Conexão válida com ${url} (${result.rows[0].db_name})`)
+      const result = await client.query('SELECT current_database() as db_name')
+
+      const parsed = new URL(url)
+      if (parsed.password) parsed.password = '****'
+
+      this.log(`✓ Conexão válida com ${parsed.host}/${result.rows[0].db_name}`)
+
       await client.end()
+
       return true
-    } catch (error) {
-      this.log(`✗ Falha na validação da conexão com ${url}: ${error}`)
+    } catch (error: any) {
+      const host = (() => {
+        try {
+          return new URL(url).host
+        } catch {
+          return url
+        }
+      })()
+      this.log(`✗ Falha na conexão com ${host}: ${error.message || error}`)
       return false
     }
   }
 
+  /**
+   * Checks if a table exists in the database
+   */
   private async tableExists(client: Client, table: string): Promise<boolean> {
     try {
       if (!table || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table)) {
@@ -201,6 +253,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Gets list of tables to synchronize
+   */
   private async getTables(): Promise<string[]> {
     this.log('Obtendo lista de tabelas...')
 
@@ -222,18 +277,9 @@ export class DatabaseSync {
         FROM information_schema.tables
         WHERE table_schema = 'public'
         AND table_type = 'BASE TABLE'
-        ${
-          this.config.excludeTables.length > 0
-            ? `AND table_name NOT IN (${this.config.excludeTables.map((_, i) => `$${i + 1}`).join(', ')})`
-            : ''
-        }
         ORDER BY table_name;
       `
-
-      const result = await client.query(
-        query,
-        this.config.excludeTables.length > 0 ? this.config.excludeTables : []
-      )
+      const result = await client.query(query)
 
       const tables = result.rows
         .map((row) => row.table_name)
@@ -247,7 +293,6 @@ export class DatabaseSync {
         return []
       }
 
-      // Verificar quais tabelas existem no destino
       const targetClient = await this.createClient(this.config.targetUrl)
       const tablesToSync: string[] = []
 
@@ -277,6 +322,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Analyzes table dependencies for proper synchronization order
+   */
   private async getTableDependencies(tables: string[]): Promise<TableDependency[]> {
     if (tables.length === 0) return []
 
@@ -284,15 +332,14 @@ export class DatabaseSync {
 
     try {
       this.log(`Analisando dependências para ${tables.length} tabelas...`)
-      this.log(`Tabelas: ${tables.join(', ')}`)
 
-      // Buscar TODAS as FKs (incluindo externas)
       const result = await client.query(
         `
-      SELECT DISTINCT
+      SELECT
         tc.table_name as source_table,
         ccu.table_name as target_table,
-        tc.constraint_name as constraint_name
+        kcu.column_name as source_column,
+        ccu.column_name as target_column
       FROM information_schema.table_constraints AS tc
       JOIN information_schema.key_column_usage AS kcu
         ON tc.constraint_name = kcu.constraint_name
@@ -302,139 +349,62 @@ export class DatabaseSync {
         AND ccu.table_schema = tc.table_schema
       WHERE tc.constraint_type = 'FOREIGN KEY'
       AND tc.table_schema = 'public'
-      AND tc.table_name = ANY($1::text[])
+      AND tc.table_name IN (${tables.map((_, i) => `$${i + 1}`).join(', ')})
       ORDER BY tc.table_name, ccu.table_name
-      `,
-        [tables]
+    `,
+        tables
       )
 
       this.log(`Encontradas ${result.rows.length} dependências de FK`)
 
-      // Log de TODAS as FKs encontradas
       if (result.rows.length > 0) {
-        this.log('\n=== TODAS AS FKs DETECTADAS ===')
+        this.log('\n=== FKs DETECTADAS ===')
         result.rows.forEach((row) => {
-          const isInternal = tables.includes(row.target_table)
-          const marker = isInternal ? '✓' : '⚠️ EXTERNA'
-          this.log(`  ${marker} ${row.source_table} → ${row.target_table} (${row.constraint_name})`)
+          this.log(
+            `  ${row.source_table}.${row.source_column} → ${row.target_table}.${row.target_column}`
+          )
         })
-        this.log('================================\n')
+        this.log('======================\n')
       }
 
-      // Criar mapa de dependências
       const dependencyMap = new Map<string, string[]>()
-      const externalDependencies = new Set<string>()
 
-      // Inicializar todas as tabelas
       tables.forEach((table) => {
         dependencyMap.set(table, [])
       })
 
-      // Preencher dependências
       for (const row of result.rows) {
-        if (row.source_table !== row.target_table) {
-          // Verificar se é dependência externa
-          if (!tables.includes(row.target_table)) {
-            externalDependencies.add(`${row.source_table} → ${row.target_table}`)
-            this.log(
-              `⚠️  AVISO: ${row.source_table} depende de ${row.target_table} que NÃO está sendo sincronizada!`
-            )
-          } else {
-            // Dependência interna válida
-            const currentDeps = dependencyMap.get(row.source_table) || []
-            if (!currentDeps.includes(row.target_table)) {
-              currentDeps.push(row.target_table)
-              dependencyMap.set(row.source_table, currentDeps)
-            }
+        if (row.source_table !== row.target_table && tables.includes(row.target_table)) {
+          const currentDeps = dependencyMap.get(row.source_table) || []
+          if (!currentDeps.includes(row.target_table)) {
+            currentDeps.push(row.target_table)
+            dependencyMap.set(row.source_table, currentDeps)
           }
         }
       }
 
-      // Avisar sobre dependências externas
-      if (externalDependencies.size > 0) {
-        this.log(`\n⚠️  ${externalDependencies.size} dependências externas detectadas!`)
-        this.log('Isso pode causar erros de FK. Considere adicionar essas tabelas ao sync.\n')
-      }
-
-      // Log das dependências internas
-      let hasDependencies = false
-      dependencyMap.forEach((deps, table) => {
-        if (deps.length > 0) {
-          if (!hasDependencies) {
-            this.log('Dependências INTERNAS encontradas:')
-            hasDependencies = true
-          }
-          this.log(`  ${table} → ${deps.join(', ')}`)
-        }
-      })
-
-      if (!hasDependencies) {
-        this.log('Nenhuma dependência interna encontrada entre as tabelas')
-      }
-
-      // Converter para array de TableDependency
       const dependencies: TableDependency[] = []
       dependencyMap.forEach((dependsOn, table) => {
         dependencies.push({ table, dependsOn, depth: 0 })
       })
 
-      // Calcular profundidades
       this.calculateDependencyDepth(dependencies)
 
-      // Ordenar por profundidade e depois por nome
       const sorted = dependencies.sort((a, b) => {
         if (a.depth !== b.depth) return a.depth - b.depth
         return a.table.localeCompare(b.table)
       })
 
-      this.log('\n=== ORDEM DE SINCRONIZAÇÃO CALCULADA ===')
+      this.log('=== ORDEM DE SINCRONIZAÇÃO ===')
       sorted.forEach((dep, index) => {
         const depsStr = dep.dependsOn.length > 0 ? ` (depende de: ${dep.dependsOn.join(', ')})` : ''
         this.log(`  ${index + 1}. ${dep.table} [nível ${dep.depth}]${depsStr}`)
       })
-
-      // Verificação específica para empresa e configuracaoEtiqueta
-      this.log('\n=== VERIFICAÇÃO ESPECÍFICA ===')
-      const empresa = sorted.find((d) => d.table === 'empresa')
-      const config = sorted.find((d) => d.table === 'configuracaoEtiqueta')
-
-      if (empresa) {
-        this.log(
-          `✓ empresa encontrada: depth=${empresa.depth}, depende de [${empresa.dependsOn.join(', ') || 'nenhuma'}]`
-        )
-      } else {
-        this.log(`✗ empresa NÃO encontrada na lista de tabelas a sincronizar!`)
-      }
-
-      if (config) {
-        this.log(
-          `✓ configuracaoEtiqueta encontrada: depth=${config.depth}, depende de [${config.dependsOn.join(', ') || 'nenhuma'}]`
-        )
-      } else {
-        this.log(`✗ configuracaoEtiqueta NÃO encontrada na lista de tabelas a sincronizar!`)
-      }
-
-      if (empresa && config) {
-        if (empresa.depth < config.depth) {
-          this.log(
-            `✓ ORDEM CORRETA: empresa (${empresa.depth}) será processada ANTES de configuracaoEtiqueta (${config.depth})`
-          )
-        } else if (empresa.depth === config.depth) {
-          this.log(
-            `⚠️  MESMO NÍVEL: empresa e configuracaoEtiqueta estão no nível ${empresa.depth} - podem ter race condition!`
-          )
-        } else {
-          this.log(
-            `✗ ORDEM ERRADA: configuracaoEtiqueta (${config.depth}) será processada ANTES de empresa (${empresa.depth})!`
-          )
-        }
-      }
-      this.log('================================\n')
+      this.log('=============================\n')
 
       return sorted
     } catch (error) {
       this.log(`ERRO na análise de dependências: ${error}. Usando ordenação alfabética.`)
-      // Fallback: ordenação alfabética
       return tables
         .map((table) => ({ table, dependsOn: [], depth: 0 }))
         .sort((a, b) => a.table.localeCompare(b.table))
@@ -443,6 +413,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Calculates dependency depth for topological sorting
+   */
   private calculateDependencyDepth(dependencies: TableDependency[]): void {
     let changed = true
     let iterations = 0
@@ -476,6 +449,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Ensures temporary directory exists
+   */
   private async ensureTempDir(): Promise<void> {
     if (this.tempDirInitialized) {
       return
@@ -495,6 +471,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Gets table metadata including primary key and row count
+   */
   private async getTableMetadata(table: string): Promise<{
     hasUpdatedAt: boolean
     primaryKey: string
@@ -507,7 +486,6 @@ export class DatabaseSync {
     const client = await this.createClient(this.config.sourceUrl)
 
     try {
-      // Verificar se tem updated_at
       const updatedAtResult = await client.query(
         `
         SELECT EXISTS (
@@ -518,7 +496,6 @@ export class DatabaseSync {
         [table]
       )
 
-      // Obter chave primária
       const pkResult = await client.query(
         `
         SELECT a.attname as column_name
@@ -530,7 +507,6 @@ export class DatabaseSync {
         [`"${table}"`]
       )
 
-      // Contar registros
       const countResult = await client.query(`SELECT COUNT(*) as count FROM "${table}"`)
 
       const metadata = {
@@ -555,6 +531,69 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Gets common columns between source and target tables
+   */
+  private async getCommonColumns(table: string): Promise<string[]> {
+    const sourceClient = await this.createClient(this.config.sourceUrl)
+    const targetClient = await this.createClient(this.config.targetUrl)
+
+    try {
+      const sourceRes = await sourceClient.query(
+        `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = $1
+      ORDER BY ordinal_position
+    `,
+        [table]
+      )
+
+      const targetRes = await targetClient.query(
+        `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = $1
+      ORDER BY ordinal_position
+    `,
+        [table]
+      )
+
+      const sourceCols = sourceRes.rows.map((r) => r.column_name)
+      const targetCols = new Set(targetRes.rows.map((r) => r.column_name))
+
+      const common = sourceCols.filter((col) => targetCols.has(col))
+      const onlyInSource = sourceCols.filter((col) => !targetCols.has(col))
+      const onlyInTarget = targetRes.rows
+        .map((r) => r.column_name)
+        .filter((col) => !sourceCols.includes(col))
+
+      if (onlyInSource.length > 0) {
+        this.log(`⚠️  Colunas apenas no SOURCE (serão ignoradas): ${onlyInSource.join(', ')}`)
+      }
+      if (onlyInTarget.length > 0) {
+        this.log(`⚠️  Colunas apenas no TARGET (não serão preenchidas): ${onlyInTarget.join(', ')}`)
+      }
+
+      this.log(
+        `Colunas comuns para "${table}": ${common.join(', ')} (source: ${sourceCols.length}, target: ${targetRes.rows.length}, comuns: ${common.length})`
+      )
+
+      if (common.length === 0) {
+        this.log(`AVISO: Nenhuma coluna comum encontrada para "${table}", pulando sync`)
+        return []
+      }
+
+      return common
+    } finally {
+      await sourceClient.end()
+      await targetClient.end()
+    }
+  }
+
+  /**
+   * Gets the last synchronization time for a table
+   */
   private async getLastSyncTime(table: string): Promise<Date | null> {
     const client = await this.createClient(this.config.targetUrl)
 
@@ -571,17 +610,15 @@ export class DatabaseSync {
     }
   }
 
-  private async dumpTableData(
-    table: string,
-    hasUpdatedAt: boolean,
-    lastSyncTime: Date | null
-  ): Promise<string> {
+  /**
+   * Dumps table data to a temporary file
+   */
+  private async dumpTableData(table: string): Promise<string> {
     await this.ensureTempDir()
     const dumpFile = path.join(this.tempDir, `${table}_${Date.now()}.dump`)
 
     const sourceParams = this.getConnectionParams(this.config.sourceUrl)
 
-    // Validar se pg_dump está disponível
     try {
       await execAsync('pg_dump --version')
     } catch {
@@ -601,11 +638,6 @@ export class DatabaseSync {
       `--table="${table}"`,
       `--file=${dumpFile}`
     ]
-
-    // Adicionar filtro por updated_at se disponível
-    if (hasUpdatedAt && lastSyncTime) {
-      args.push(`--where="updated_at>'${lastSyncTime.toISOString()}'"`)
-    }
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -655,17 +687,23 @@ export class DatabaseSync {
     })
   }
 
+  /**
+   * Restores table data from dump file using multiple strategies
+   */
   private async restoreTableData(
     table: string,
     dumpFile: string,
     primaryKey: string
   ): Promise<void> {
     const targetParams = this.getConnectionParams(this.config.targetUrl)
-
-    // Estratégia de restauração em 3 fases:
-
-    // Fase 1: Tentar pg_restore normal
+    if (table === 'pessoa') {
+      this.log(`🔍 [DEBUG] Processando tabela pessoa - PK: ${primaryKey}`)
+      const commonCols = await this.getCommonColumns('pessoa')
+      this.log(`🔍 [DEBUG] Colunas comuns de pessoa: ${commonCols.join(', ')}`)
+    }
     try {
+      this.log(`Tentando restore direto para "${table}"...`)
+
       const args = [
         `--dbname=postgresql://${targetParams.user}:${targetParams.password}@${targetParams.host}:${targetParams.port}/${targetParams.database}`,
         '--no-password',
@@ -682,126 +720,247 @@ export class DatabaseSync {
         PGSSLMODE: targetParams.ssl ? 'require' : 'prefer'
       }
 
-      this.log(`Restaurando dados para "${table}" (fase 1)...`)
-
       await this.executeCommand('pg_restore', args, env, 300000)
-      this.log(`✓ Restore concluído para "${table}"`)
+      this.log(`✓ Restore direto concluído para "${table}"`)
       return
     } catch (error: any) {
-      this.log(`Fase 1 falhou para "${table}": ${error.message}`)
-    }
+      this.log(`Restore direto falhou para "${table}": ${error.message}`)
 
-    // Fase 2: Tentar UPSERT com fallback para FK errors
-    try {
-      await this.restoreWithUpsert(table, dumpFile, primaryKey)
-      this.log(`✓ UPSERT concluído para "${table}"`)
-      return
-    } catch (error: any) {
-      this.log(`Fase 2 falhou para "${table}": ${error.message}`)
-    }
+      try {
+        await this.restoreWithUpsert(table, dumpFile, primaryKey)
+        this.log(`✓ UPSERT concluído para "${table}"`)
+        return
+      } catch (upsertError: any) {
+        this.log(`UPSERT falhou para "${table}": ${upsertError.message}`)
 
-    // Fase 3: Tentar INSERT IGNORE (mais tolerante a FKs)
-    try {
-      await this.restoreWithInsertIgnore(table, dumpFile)
-      this.log(`✓ INSERT IGNORE concluído para "${table}"`)
-      return
-    } catch (error: any) {
-      this.log(`Fase 3 falhou para "${table}": ${error.message}`)
-      throw new Error(`Todos os métodos de restauração falharam para "${table}"`)
+        try {
+          await this.restoreWithInsertIgnore(table, dumpFile)
+          this.log(`✓ INSERT IGNORE concluído para "${table}"`)
+          return
+        } catch (ignoreError: any) {
+          this.log(`INSERT IGNORE falhou para "${table}": ${ignoreError.message}`)
+          throw new Error(`Todos os métodos de restauração falharam para "${table}"`)
+        }
+      }
     }
   }
 
+  /**
+   * Executes a shell command with timeout
+   */
   private async executeCommand(
     command: string,
     args: string[],
     env: NodeJS.ProcessEnv,
     timeout: number
-  ): Promise<void> {
+  ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
-      const process: ChildProcess = spawn(command, args, { env })
-
-      const timeoutId = setTimeout(() => {
-        process.kill('SIGTERM')
-        reject(new Error(`Timeout no ${command}`))
-      }, timeout)
-
+      const proc = spawn(command, args, { env })
+      let stdout = ''
       let stderr = ''
 
-      process.stderr?.on('data', (data) => {
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString()
+      })
+
+      proc.stderr.on('data', (data) => {
         stderr += data.toString()
       })
 
-      process.on('close', (code) => {
-        clearTimeout(timeoutId)
-
-        if (code === 0) {
-          resolve()
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          reject(new Error(`${command} falhou com código ${code}: ${stderr}`))
         } else {
-          reject(new Error(`${command} falhou (código ${code}): ${stderr}`))
+          resolve({ stdout, stderr })
         }
       })
 
-      process.on('error', (error) => {
-        clearTimeout(timeoutId)
-        reject(new Error(`Erro ao executar ${command}: ${error}`))
-      })
+      setTimeout(() => {
+        proc.kill()
+        reject(new Error(`${command} timed out após ${timeout}ms`))
+      }, timeout)
     })
   }
 
+  /**
+   * Restores data using UPSERT strategy
+   */
   private async restoreWithUpsert(
     table: string,
     dumpFile: string,
     primaryKey: string
   ): Promise<void> {
-    const targetParams = this.getConnectionParams(this.config.targetUrl)
+    const tempTable = `temp_${table}_${Date.now()}`
     const sqlFile = dumpFile.replace('.dump', '.sql')
 
+    const client = await this.createClient(this.config.targetUrl)
+
     try {
-      // Converter dump para SQL
-      const convertEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        PGPASSWORD: String(targetParams.password) || '',
-        PGSSLMODE: targetParams.ssl ? 'require' : 'prefer'
+      this.log(`Convertendo dump para SQL...`)
+      await this.executeCommand(
+        'pg_restore',
+        ['--data-only', '--file=' + sqlFile, dumpFile],
+        { ...process.env },
+        300000
+      )
+      this.log(`✓ Conversão para SQL concluída`)
+
+      const commonColumns = await this.getCommonColumns(table)
+      if (commonColumns.length === 0) {
+        this.log(`✗ Pulando "${table}" - nenhuma coluna comum com o target`)
+        return
+      }
+      if (!commonColumns.includes(primaryKey)) {
+        this.log(`✗ Pulando "${table}" - chave primária "${primaryKey}" não existe no target`)
+        return
       }
 
-      await this.executeCommand('pg_restore', ['--file=' + sqlFile, dumpFile], convertEnv, 300000)
+      const commonColumnsList = commonColumns.map((col) => `"${col}"`).join(', ')
+      await client.query(`
+      DROP TABLE IF EXISTS "${tempTable}" CASCADE;
+      CREATE TEMPORARY TABLE "${tempTable}" AS
+      SELECT ${commonColumnsList} FROM "${table}" WHERE false;
+    `)
+      this.log(`✓ Tabela temporária "${tempTable}" criada com ${commonColumns.length} colunas`)
 
-      // Ler e modificar o SQL
-      let sqlContent = await fs.readFile(sqlFile, 'utf8')
+      this.log(`Processando arquivo SQL...`)
+      const sqlContent = await fs.readFile(sqlFile, 'utf8')
 
-      // Substituir COPY por INSERT com ON CONFLICT
-      sqlContent = this.convertCopyToUpsert(sqlContent, table, primaryKey)
-
-      await fs.writeFile(sqlFile, sqlContent, 'utf8')
-
-      // Executar SQL modificado
-      const args = [
-        `--host=${targetParams.host}`,
-        `--port=${targetParams.port}`,
-        `--username=${targetParams.user}`,
-        `--dbname=${targetParams.database}`,
-        '--no-password',
-        '--file=' + sqlFile
-      ]
-
-      const psqlEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        PGPASSWORD: String(targetParams.password) || '',
-        PGSSLMODE: targetParams.ssl ? 'require' : 'prefer'
+      const copyBlocks = sqlContent.split('COPY ')
+      if (copyBlocks.length < 2) {
+        this.log(`✗ Não encontrou comando COPY`)
+        return
       }
 
-      await this.executeCommand('psql', args, psqlEnv, 300000)
+      const copyBlock = 'COPY ' + copyBlocks[1].split('\n\\.')[0] + '\n\\.'
+
+      const firstLineEnd = copyBlock.indexOf('\n')
+      if (firstLineEnd === -1) {
+        this.log(`✗ Formato COPY inválido`)
+        return
+      }
+
+      const headerLine = copyBlock.substring(0, firstLineEnd)
+
+      const columnsMatch = headerLine.match(/\(([^)]+)\)/)
+      if (!columnsMatch) {
+        this.log(`✗ Não conseguiu extrair colunas`)
+        return
+      }
+
+      const copyColumnNames = columnsMatch[1].split(',').map((col) => col.trim().replace(/"/g, ''))
+
+      this.log(`📋 ${copyColumnNames.length} colunas no COPY`)
+
+      const columnsWithNulls = commonColumns.filter((col) => !copyColumnNames.includes(col))
+      if (columnsWithNulls.length > 0) {
+        this.log(
+          `⚠️  Colunas que receberão NULL (não estão no dump): ${columnsWithNulls.join(', ')}`
+        )
+      }
+
+      const columnMapping: number[] = []
+      commonColumns.forEach((commonCol) => {
+        const positionInCopy = copyColumnNames.indexOf(commonCol)
+        columnMapping.push(positionInCopy)
+      })
+
+      const dataStart = copyBlock.indexOf('\n') + 1
+      const dataEnd = copyBlock.lastIndexOf('\n\\.')
+      if (dataStart >= dataEnd) {
+        this.log(`✗ Não encontrou dados`)
+        return
+      }
+
+      const dataContent = copyBlock.substring(dataStart, dataEnd)
+      const dataLines = dataContent
+        .split('\n')
+        .filter((line) => line.trim() && !line.startsWith('\\'))
+        .map((line) => line.split('\t'))
+
+      this.log(`📊 ${dataLines.length} registros encontrados`)
+
+      if (dataLines.length === 0) {
+        this.log(`✗ Nenhum dado`)
+        return
+      }
+
+      this.log(`Inserindo dados...`)
+      let successfulInserts = 0
+
+      const batchSize = 1000
+
+      for (let i = 0; i < dataLines.length; i += batchSize) {
+        const batch = dataLines.slice(i, i + batchSize)
+
+        const batchPromises = batch.map(async (lineValues) => {
+          try {
+            const mappedValues = columnMapping.map((copyIndex) => {
+              if (copyIndex === -1 || copyIndex >= lineValues.length) return null
+              const value = lineValues[copyIndex]
+              return value === '\\N' ? null : value
+            })
+
+            const placeholders = commonColumns.map((_, idx) => `$${idx + 1}`).join(', ')
+            const insertSQL = `INSERT INTO "${tempTable}" (${commonColumnsList}) VALUES (${placeholders})`
+
+            await client.query(insertSQL, mappedValues)
+            return true
+          } catch {
+            return false
+          }
+        })
+
+        const batchResults = await Promise.all(batchPromises)
+        successfulInserts += batchResults.filter(Boolean).length
+
+        if (i > 0 && i % 5000 === 0) {
+          this.log(`📦 ${i}/${dataLines.length} registros`)
+        }
+      }
+
+      this.log(`✅ ${successfulInserts}/${dataLines.length} registros carregados`)
+
+      if (successfulInserts === 0) {
+        this.log(`❌ Nenhum registro inserido`)
+        return
+      }
+
+      this.log(`Executando UPSERT...`)
+      const upsertSQL = `
+      INSERT INTO "${table}" (${commonColumnsList})
+      SELECT ${commonColumnsList} FROM "${tempTable}"
+      ON CONFLICT ("${primaryKey}") DO UPDATE SET
+        ${commonColumns
+          .filter((c) => c !== primaryKey)
+          .map((c) => `"${c}" = EXCLUDED."${c}"`)
+          .join(', ')};
+    `
+
+      const result = await client.query(upsertSQL)
+      this.log(`🎉 ${result.rowCount} linhas sincronizadas`)
+    } catch (error: any) {
+      this.log(`💥 Falha: ${error.message}`)
+      throw error
     } finally {
+      try {
+        await client.query(`DROP TABLE IF EXISTS "${tempTable}"`).catch(() => {})
+      } catch {
+        //
+      }
+      await client.end().catch(() => {})
       await fs.unlink(sqlFile).catch(() => {})
     }
   }
 
+  /**
+   * Restores data using INSERT IGNORE strategy
+   */
   private async restoreWithInsertIgnore(table: string, dumpFile: string): Promise<void> {
     const targetParams = this.getConnectionParams(this.config.targetUrl)
     const sqlFile = dumpFile.replace('.dump', '.sql')
 
     try {
-      // Converter dump para SQL
       const convertEnv: NodeJS.ProcessEnv = {
         ...process.env,
         PGPASSWORD: String(targetParams.password) || '',
@@ -810,15 +969,12 @@ export class DatabaseSync {
 
       await this.executeCommand('pg_restore', ['--file=' + sqlFile, dumpFile], convertEnv, 300000)
 
-      // Ler SQL
       let sqlContent = await fs.readFile(sqlFile, 'utf8')
 
-      // Substituir COPY por INSERT com ON CONFLICT DO NOTHING
       sqlContent = this.convertCopyToInsertIgnore(sqlContent, table)
 
       await fs.writeFile(sqlFile, sqlContent, 'utf8')
 
-      // Executar SQL
       const args = [
         `--host=${targetParams.host}`,
         `--port=${targetParams.port}`,
@@ -840,41 +996,88 @@ export class DatabaseSync {
     }
   }
 
-  private convertCopyToUpsert(sqlContent: string, tableName: string, primaryKey: string): string {
+  /**
+   * Converts COPY commands to UPSERT SQL
+   */
+  private convertCopyToUpsert(
+    sqlContent: string,
+    tableName: string,
+    primaryKey: string,
+    commonColumns: string[]
+  ): string {
     const copyPattern = /COPY "([^"]+)" \(([^)]+)\) FROM stdin;\n([\s\S]*?)\n\\\./g
 
     return sqlContent.replace(copyPattern, (match, extractedTableName, columns, data) => {
-      if (extractedTableName !== tableName) return match
+      const actualTable = extractedTableName.split('.').pop() || extractedTableName
+      if (actualTable !== tableName) {
+        console.log(`[UPSERT LOG] Ignorando tabela ${actualTable}, não corresponde a ${tableName}`)
+        return match
+      }
 
-      const columnList = columns.split(', ').map((col) => col.replace(/"/g, ''))
+      const sourceColumnList = columns.split(', ').map((col) => col.replace(/"/g, ''))
+      const filteredColumns: string[] = []
+      const columnIndices: number[] = []
 
-      const valueLines = data
+      sourceColumnList.forEach((col, idx) => {
+        if (commonColumns.includes(col)) {
+          filteredColumns.push(col)
+          columnIndices.push(idx)
+        } else {
+          console.log(`[UPSERT LOG] Coluna "${col}" não existe no target e será ignorada`)
+        }
+      })
+
+      if (filteredColumns.length === 0) {
+        console.log(
+          `[UPSERT LOG] Nenhuma coluna compatível encontrada para a tabela "${tableName}", pulando inserção`
+        )
+        return '-- Nenhuma coluna compatível encontrada, pulando...'
+      }
+
+      const rows = data
         .split('\n')
         .filter((line) => line.trim() && !line.startsWith('\\'))
-        .map((line) => {
-          const values = line.split('\t').map((val) => {
+        .map((line, idx) => {
+          const values = line.split('\t')
+          const filteredValues = columnIndices.map((i) => {
+            const val = values[i]
             if (val === '\\N') return 'NULL'
             return `'${val.replace(/'/g, "''")}'`
           })
-          return `    (${values.join(', ')})`
+          if (idx < 5) {
+            console.log(`[UPSERT LOG] Linha ${idx + 1} processada: (${filteredValues.join(', ')})`)
+          }
+          return `(${filteredValues.join(', ')})`
         })
 
-      if (valueLines.length === 0) return ''
+      console.log(`[UPSERT LOG] Total de linhas processadas para "${tableName}": ${rows.length}`)
+
+      if (rows.length === 0) {
+        console.log(`[UPSERT LOG] Nenhuma linha para inserir para a tabela "${tableName}"`)
+        return '-- Nenhuma linha para inserir'
+      }
 
       const upsertSQL =
-        `INSERT INTO "${extractedTableName}" (${columnList.map((col) => `"${col}"`).join(', ')})\n` +
-        `VALUES\n${valueLines.join(',\n')}\n` +
+        `INSERT INTO "${tableName}" (${filteredColumns.map((col) => `"${col}"`).join(', ')})\n` +
+        `VALUES\n${rows.join(',\n')}\n` +
         `ON CONFLICT ("${primaryKey}") DO UPDATE SET\n` +
-        columnList
+        filteredColumns
           .filter((col) => col !== primaryKey)
           .map((col) => `  "${col}" = EXCLUDED."${col}"`)
           .join(',\n') +
-        ';'
+        ';\n'
+
+      console.log(
+        `[UPSERT LOG] INSERT gerado com ${rows.length} linhas e ${filteredColumns.length} colunas para "${tableName}"`
+      )
 
       return upsertSQL
     })
   }
 
+  /**
+   * Converts COPY commands to INSERT IGNORE SQL
+   */
   private convertCopyToInsertIgnore(sqlContent: string, tableName: string): string {
     const copyPattern = /COPY "([^"]+)" \(([^)]+)\) FROM stdin;\n([\s\S]*?)\n\\\./g
 
@@ -905,6 +1108,9 @@ export class DatabaseSync {
     })
   }
 
+  /**
+   * Synchronizes a single table
+   */
   private async syncTable(
     table: string,
     tableIndex: number,
@@ -914,38 +1120,23 @@ export class DatabaseSync {
       this.updateProgress(table, tableIndex, totalTables, 'processing', 'iniciando')
       this.log(`Iniciando sync da tabela "${table}"`)
 
-      // Obter metadados
-      this.updateProgress(table, tableIndex, totalTables, 'processing', 'obtendo metadados')
       const metadata = await this.getTableMetadata(table)
       this.log(`Metadados "${table}": ${metadata.rowCount} linhas, PK: ${metadata.primaryKey}`)
 
-      // Obter último sync se tiver updated_at
-      let lastSyncTime: Date | null = null
-      if (metadata.hasUpdatedAt) {
-        this.updateProgress(table, tableIndex, totalTables, 'processing', 'verificando último sync')
-        lastSyncTime = await this.getLastSyncTime(table)
-        this.log(`Último sync "${table}": ${lastSyncTime || 'primeira execução'}`)
-      }
-
-      // Fazer dump
-      this.updateProgress(table, tableIndex, totalTables, 'processing', 'fazendo dump')
-      const dumpFile = await this.dumpTableData(table, metadata.hasUpdatedAt, lastSyncTime)
+      const dumpFile = await this.dumpTableData(table)
 
       try {
-        // Restaurar dados
-        this.updateProgress(table, tableIndex, totalTables, 'processing', 'restaurando dados')
         await this.restoreTableData(table, dumpFile, metadata.primaryKey)
 
-        // Limpar arquivo temporário
         await fs.unlink(dumpFile).catch(() => {})
 
         this.updateProgress(table, tableIndex + 1, totalTables, 'completed')
         this.log(`✓ Sync concluído para "${table}"`)
         return true
       } catch (error) {
-        // Limpar arquivo em caso de erro
+        this.log(`✗ Sync falhou para "${table}": ${error}`)
         await fs.unlink(dumpFile).catch(() => {})
-        throw error
+        return false
       }
     } catch (error) {
       this.updateProgress(table, tableIndex + 1, totalTables, 'error')
@@ -954,6 +1145,9 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Processes a batch of tables in parallel
+   */
   private async processTableBatch(
     tables: string[],
     startIndex: number,
@@ -984,6 +1178,9 @@ export class DatabaseSync {
     return successful
   }
 
+  /**
+   * Executes immediate synchronization
+   */
   async syncNow(): Promise<void> {
     if (this.isRunning) {
       this.log('Sincronização já em andamento...')
@@ -998,16 +1195,12 @@ export class DatabaseSync {
       this.updateProgress('', 0, 0, 'starting', 'iniciando sincronização')
       this.log('=== INICIANDO SINCRONIZAÇÃO ===')
 
-      // Validação pré-sincronização
       await this.preSyncValidation()
 
-      // Conectar ao banco target
       targetClient = await this.createClient(this.config.targetUrl)
 
-      // Desabilitar ALL triggers em TODAS as tabelas
       this.log('Desabilitando triggers de foreign key em todas as tabelas...')
 
-      // Obter lista de tabelas do target
       const tablesResult = await targetClient.query(`
       SELECT tablename
       FROM pg_tables
@@ -1016,7 +1209,6 @@ export class DatabaseSync {
 
       const allTables = tablesResult.rows.map((row) => row.tablename)
 
-      // Desabilitar triggers em cada tabela
       for (const table of allTables) {
         try {
           await targetClient.query(`ALTER TABLE "${table}" DISABLE TRIGGER ALL;`)
@@ -1028,7 +1220,6 @@ export class DatabaseSync {
       this.log(`✓ Triggers desabilitados em ${allTables.length} tabelas`)
 
       try {
-        // Obter tabelas para sincronizar
         this.updateProgress('', 0, 0, 'processing', 'obtendo lista de tabelas')
         const tables = await this.getTables()
 
@@ -1037,14 +1228,12 @@ export class DatabaseSync {
           return
         }
 
-        // Analisar dependências
         this.updateProgress('', 0, 0, 'processing', 'analisando dependências')
         const dependencies = await this.getTableDependencies(tables)
 
         this.updateProgress('', 0, tables.length, 'processing', 'iniciando sync')
         let successCount = 0
 
-        // Processar tabelas em ordem de dependência
         const maxDepth = Math.max(...dependencies.map((d) => d.depth))
 
         for (let depth = 0; depth <= maxDepth; depth++) {
@@ -1056,16 +1245,28 @@ export class DatabaseSync {
 
           this.log(`Processando nível ${depth} (${tablesAtDepth.length} tabelas)`)
 
-          // Processar em batches
           const batchSize = this.config.maxParallelTables!
           for (let i = 0; i < tablesAtDepth.length; i += batchSize) {
             const batch = tablesAtDepth.slice(i, i + batchSize)
 
-            const currentIndex = dependencies.findIndex((dep) => dep.table === batch[0])
-            const batchSuccess = await this.processTableBatch(batch, currentIndex, tables.length)
-            successCount += batchSuccess
+            const excluded = this.config.excludeTables ?? []
+            const batchToProcess = batch.filter((table) => !excluded.includes(table))
 
-            // Pequena pausa entre batches
+            const skipped = batch.filter((table) => excluded.includes(table))
+            if (skipped.length > 0) {
+              this.log(`Pulando inserção de dados para tabelas: ${skipped.join(', ')}`)
+            }
+
+            if (batchToProcess.length > 0) {
+              const currentIndex = dependencies.findIndex((dep) => dep.table === batchToProcess[0])
+              const batchSuccess = await this.processTableBatch(
+                batchToProcess,
+                currentIndex,
+                tables.length
+              )
+              successCount += batchSuccess
+            }
+
             if (i + batchSize < tablesAtDepth.length) {
               await new Promise((resolve) => setTimeout(resolve, 1000))
             }
@@ -1078,7 +1279,6 @@ export class DatabaseSync {
           `=== SINCRONIZAÇÃO CONCLUÍDA: ${successCount}/${tables.length} tabelas em ${duration}s ===`
         )
       } finally {
-        // Reabilitar triggers em todas as tabelas
         if (targetClient) {
           this.log('Reabilitando triggers de foreign key...')
 
@@ -1105,13 +1305,14 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Performs pre-synchronization validation
+   */
   private async preSyncValidation(): Promise<void> {
     this.log('Executando validações pré-sincronização...')
 
-    // Validar diretório temporário
     await this.ensureTempDir()
 
-    // Validar ferramentas
     const tools = ['pg_dump', 'pg_restore', 'psql']
     for (const tool of tools) {
       try {
@@ -1123,13 +1324,14 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Starts scheduled synchronization
+   */
   async startScheduled(): Promise<void> {
     this.log(`Iniciando sincronização agendada (${this.config.intervalMinutes} minutos)...`)
 
-    // Executar imediatamente
     await this.syncNow()
 
-    // Agendar execuções periódicas
     this.intervalId = setInterval(
       () => {
         this.syncNow().catch((error) => {
@@ -1142,6 +1344,9 @@ export class DatabaseSync {
     this.log(`✓ Sincronização agendada iniciada`)
   }
 
+  /**
+   * Stops scheduled synchronization
+   */
   stop(): void {
     if (this.intervalId) {
       clearInterval(this.intervalId)
@@ -1150,15 +1355,21 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Gets current synchronization progress
+   */
   getCurrentProgress(): ProgressInfo {
     return { ...this.progressInfo }
   }
 
+  /**
+   * Cleans up old temporary files
+   */
   async cleanupOldFiles(): Promise<void> {
     try {
       const files = await fs.readdir(this.tempDir)
       const now = Date.now()
-      const maxAge = 24 * 60 * 60 * 1000 // 24 horas
+      const maxAge = 24 * 60 * 60 * 1000
 
       let cleanedCount = 0
       for (const file of files) {
@@ -1182,6 +1393,12 @@ export class DatabaseSync {
     }
   }
 
+  /**
+   * Runs Prisma migrations on target database
+   * @param backendDir - Backend directory containing Prisma schemas
+   * @param targetUrl - Target database URL
+   * @param logCallback - Callback function for logging
+   */
   static async runPrismaMigrations(
     backendDir: string,
     targetUrl: string,
