@@ -108,10 +108,10 @@ const LogsWindow: React.FC = () => {
           style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
         >
           <CardTitle className="text-base font-medium">
-            📋 Logs de Sincronização
-            {isRunning && (
-              <span className="ml-2 text-sm text-blue-500 animate-pulse">• Executando...</span>
-            )}
+            <div className="flex justify-center items-center gap-2">
+              📋 Logs de Sincronização
+              {isRunning && <div className="text-xs text-blue-500 animate-pulse">Executando</div>}
+            </div>
           </CardTitle>
           <div className="flex gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
             <Button size="sm" variant="outline" onClick={clearLogs}>
