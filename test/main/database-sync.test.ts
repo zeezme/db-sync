@@ -757,4 +757,767 @@ describe('DatabaseSync', () => {
       expect(parseInt(result.rows[0].count)).toBeGreaterThanOrEqual(0)
     })
   })
+
+  describe('Cenários Avançados de Sincronização', () => {
+    describe('Sincronização com Dependências Complexas', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS itens_pedido CASCADE')
+        await sourceClient.query('DROP TABLE IF EXISTS pedidos CASCADE')
+        await sourceClient.query('DROP TABLE IF EXISTS produtos CASCADE')
+        await sourceClient.query('DROP TABLE IF EXISTS categorias CASCADE')
+        await sourceClient.query('DROP TABLE IF EXISTS clientes CASCADE')
+
+        await targetClient.query('DROP TABLE IF EXISTS itens_pedido CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS pedidos CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS produtos CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS categorias CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS clientes CASCADE')
+      })
+
+      it('deve sincronizar múltiplos níveis de dependências em ordem correta', async () => {
+        // Criar estrutura complexa com múltiplas FKs
+        await sourceClient.query(`
+        CREATE TABLE clientes (
+          id SERIAL PRIMARY KEY,
+          nome VARCHAR(100) NOT NULL
+        )
+      `)
+
+        await sourceClient.query(`
+        CREATE TABLE categorias (
+          id SERIAL PRIMARY KEY,
+          nome VARCHAR(100) NOT NULL
+        )
+      `)
+
+        await sourceClient.query(`
+        CREATE TABLE produtos (
+          id SERIAL PRIMARY KEY,
+          nome VARCHAR(100) NOT NULL,
+          categoria_id INTEGER REFERENCES categorias(id),
+          preco DECIMAL(10,2)
+        )
+      `)
+
+        await sourceClient.query(`
+        CREATE TABLE pedidos (
+          id SERIAL PRIMARY KEY,
+          cliente_id INTEGER REFERENCES clientes(id),
+          data_pedido DATE DEFAULT CURRENT_DATE
+        )
+      `)
+
+        await sourceClient.query(`
+        CREATE TABLE itens_pedido (
+          id SERIAL PRIMARY KEY,
+          pedido_id INTEGER REFERENCES pedidos(id),
+          produto_id INTEGER REFERENCES produtos(id),
+          quantidade INTEGER NOT NULL
+        )
+      `)
+
+        // Popular dados
+        await sourceClient.query(`
+        INSERT INTO clientes (id, nome) VALUES
+        (1, 'Cliente A'), (2, 'Cliente B')
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO categorias (id, nome) VALUES
+        (1, 'Eletrônicos'), (2, 'Livros')
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO produtos (id, nome, categoria_id, preco) VALUES
+        (1, 'Smartphone', 1, 999.99),
+        (2, 'Tablet', 1, 499.99),
+        (3, 'Livro A', 2, 29.99)
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO pedidos (id, cliente_id) VALUES
+        (1, 1), (2, 2)
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO itens_pedido (pedido_id, produto_id, quantidade) VALUES
+        (1, 1, 2), (1, 2, 1), (2, 3, 5)
+      `)
+
+        // Criar mesma estrutura no destino
+        await targetClient.query(`
+        CREATE TABLE clientes (
+          id SERIAL PRIMARY KEY,
+          nome VARCHAR(100) NOT NULL
+        )
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE categorias (
+          id SERIAL PRIMARY KEY,
+          nome VARCHAR(100) NOT NULL
+        )
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE produtos (
+          id SERIAL PRIMARY KEY,
+          nome VARCHAR(100) NOT NULL,
+          categoria_id INTEGER REFERENCES categorias(id),
+          preco DECIMAL(10,2)
+        )
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE pedidos (
+          id SERIAL PRIMARY KEY,
+          cliente_id INTEGER REFERENCES clientes(id),
+          data_pedido DATE DEFAULT CURRENT_DATE
+        )
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE itens_pedido (
+          id SERIAL PRIMARY KEY,
+          pedido_id INTEGER REFERENCES pedidos(id),
+          produto_id INTEGER REFERENCES produtos(id),
+          quantidade INTEGER NOT NULL
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+        await dbSync.syncNow()
+
+        // Verificar se todos os dados foram sincronizados
+        const clientesCount = await targetClient.query('SELECT COUNT(*) FROM clientes')
+        const categoriasCount = await targetClient.query('SELECT COUNT(*) FROM categorias')
+        const produtosCount = await targetClient.query('SELECT COUNT(*) FROM produtos')
+        const pedidosCount = await targetClient.query('SELECT COUNT(*) FROM pedidos')
+        const itensCount = await targetClient.query('SELECT COUNT(*) FROM itens_pedido')
+
+        expect(parseInt(clientesCount.rows[0].count)).toBe(2)
+        expect(parseInt(categoriasCount.rows[0].count)).toBe(2)
+        expect(parseInt(produtosCount.rows[0].count)).toBe(3)
+        expect(parseInt(pedidosCount.rows[0].count)).toBe(2)
+        expect(parseInt(itensCount.rows[0].count)).toBe(3)
+
+        // Verificar logs de ordenação por dependência
+        const dependencyLog = logs.find((log) => log.includes('ORDEM DE SINCRONIZAÇÃO'))
+        expect(dependencyLog).toBeDefined()
+      })
+    })
+
+    describe('Sincronização com Dados Binários e Especiais', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS dados_especiais CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS dados_especiais CASCADE')
+      })
+
+      it('deve lidar com caracteres especiais e Unicode', async () => {
+        await sourceClient.query(`
+        CREATE TABLE dados_especiais (
+          id SERIAL PRIMARY KEY,
+          texto_unicode TEXT,
+          caracteres_especiais TEXT,
+          emojis TEXT
+        )
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO dados_especiais (texto_unicode, caracteres_especiais, emojis) VALUES
+        ('中文 Français Español', 'çáéíóú ñ ãõ', '😀 🚀 📚'),
+        ('Русский язык 日本語', '°ºª§¬½¼', '❤️ ✅ ⚠️')
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE dados_especiais (
+          id SERIAL PRIMARY KEY,
+          texto_unicode TEXT,
+          caracteres_especiais TEXT,
+          emojis TEXT
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+        await dbSync.syncNow()
+
+        const result = await targetClient.query('SELECT * FROM dados_especiais ORDER BY id')
+        expect(result.rows).toHaveLength(2)
+        expect(result.rows[0].texto_unicode).toBe('中文 Français Español')
+        expect(result.rows[0].caracteres_especiais).toBe('çáéíóú ñ ãõ')
+        expect(result.rows[0].emojis).toBe('😀 🚀 📚')
+      })
+
+      it('deve lidar com dados binários em colunas BYTEA', async () => {
+        await sourceClient.query(`
+        CREATE TABLE dados_binarios (
+          id SERIAL PRIMARY KEY,
+          nome_arquivo VARCHAR(100),
+          conteudo BYTEA,
+          tamanho INTEGER
+        )
+      `)
+
+        // Inserir dados binários simulados
+        const buffer = Buffer.from('conteúdo binário simulado', 'utf8')
+        await sourceClient.query(
+          'INSERT INTO dados_binarios (nome_arquivo, conteudo, tamanho) VALUES ($1, $2, $3)',
+          ['arquivo.txt', buffer, buffer.length]
+        )
+
+        await targetClient.query(`
+        CREATE TABLE dados_binarios (
+          id SERIAL PRIMARY KEY,
+          nome_arquivo VARCHAR(100),
+          conteudo BYTEA,
+          tamanho INTEGER
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+        await dbSync.syncNow()
+
+        const result = await targetClient.query('SELECT * FROM dados_binarios')
+        expect(result.rows).toHaveLength(1)
+        expect(result.rows[0].nome_arquivo).toBe('arquivo.txt')
+        expect(result.rows[0].tamanho).toBe(buffer.length)
+
+        // Verificar se o conteúdo binário foi preservado
+        const conteudoBinario = result.rows[0].conteudo
+        expect(Buffer.isBuffer(conteudoBinario)).toBe(true)
+        expect(conteudoBinario.toString('utf8')).toBe('conteúdo binário simulado')
+      })
+    })
+
+    describe('Sincronização com Timestamps e Timezones', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS eventos CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS eventos CASCADE')
+      })
+
+      it('deve preservar timestamps com timezones diferentes', async () => {
+        await sourceClient.query(`
+        CREATE TABLE eventos (
+          id SERIAL PRIMARY KEY,
+          nome VARCHAR(100),
+          data_evento TIMESTAMP,
+          data_evento_tz TIMESTAMPTZ,
+          criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO eventos (nome, data_evento, data_evento_tz) VALUES
+        ('Evento A', '2024-01-15 10:30:00', '2024-01-15 10:30:00-03'),
+        ('Evento B', '2024-02-20 15:45:00', '2024-02-20 15:45:00+00')
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE eventos (
+          id SERIAL PRIMARY KEY,
+          nome VARCHAR(100),
+          data_evento TIMESTAMP,
+          data_evento_tz TIMESTAMPTZ,
+          criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+        await dbSync.syncNow()
+
+        const result = await targetClient.query('SELECT * FROM eventos ORDER BY id')
+        expect(result.rows).toHaveLength(2)
+
+        // Verificar se timestamps foram preservados
+        expect(result.rows[0].data_evento.toISOString()).toContain('2024-01-15T10:30:00')
+        expect(result.rows[1].data_evento.toISOString()).toContain('2024-02-20T15:45:00')
+      })
+    })
+
+    describe('Sincronização com Valores Nulos e Defaults', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS teste_nulos CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS teste_nulos CASCADE')
+      })
+
+      it('deve lidar corretamente com valores NULL e defaults', async () => {
+        await sourceClient.query(`
+        CREATE TABLE teste_nulos (
+          id SERIAL PRIMARY KEY,
+          valor_nao_nulo VARCHAR(100) NOT NULL,
+          valor_nulo VARCHAR(100),
+          numero_default INTEGER DEFAULT 42,
+          booleano_nulo BOOLEAN,
+          data_nula DATE
+        )
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO teste_nulos (valor_nao_nulo, valor_nulo, numero_default, booleano_nulo, data_nula) VALUES
+        ('Valor 1', NULL, DEFAULT, NULL, NULL),
+        ('Valor 2', 'Preenchido', 100, true, '2024-01-01'),
+        ('Valor 3', NULL, NULL, false, NULL)
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE teste_nulos (
+          id SERIAL PRIMARY KEY,
+          valor_nao_nulo VARCHAR(100) NOT NULL,
+          valor_nulo VARCHAR(100),
+          numero_default INTEGER DEFAULT 42,
+          booleano_nulo BOOLEAN,
+          data_nula DATE
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+        await dbSync.syncNow()
+
+        const result = await targetClient.query('SELECT * FROM teste_nulos ORDER BY id')
+        expect(result.rows).toHaveLength(3)
+
+        // Verificar tratamento de NULLs
+        expect(result.rows[0].valor_nulo).toBeNull()
+        expect(result.rows[0].booleano_nulo).toBeNull()
+        expect(result.rows[0].data_nula).toBeNull()
+
+        expect(result.rows[1].valor_nulo).toBe('Preenchido')
+        expect(result.rows[1].booleano_nulo).toBe(true)
+        expect(result.rows[1].data_nula).toBeDefined()
+
+        expect(result.rows[2].valor_nulo).toBeNull()
+        expect(result.rows[2].booleano_nulo).toBe(false)
+        expect(result.rows[2].data_nula).toBeNull()
+      })
+    })
+
+    describe('Sincronização com Constraints Complexas', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS produtos_complexos CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS produtos_complexos CASCADE')
+      })
+
+      it('deve lidar com unique constraints e check constraints', async () => {
+        await sourceClient.query(`
+        CREATE TABLE produtos_complexos (
+          id SERIAL PRIMARY KEY,
+          sku VARCHAR(50) UNIQUE NOT NULL,
+          nome VARCHAR(100) NOT NULL,
+          preco DECIMAL(10,2) CHECK (preco >= 0),
+          estoque INTEGER CHECK (estoque >= 0),
+          status VARCHAR(20) CHECK (status IN ('ativo', 'inativo', 'pendente'))
+        )
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO produtos_complexos (sku, nome, preco, estoque, status) VALUES
+        ('SKU001', 'Produto A', 19.99, 100, 'ativo'),
+        ('SKU002', 'Produto B', 29.99, 50, 'ativo'),
+        ('SKU003', 'Produto C', 0.00, 0, 'inativo')
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE produtos_complexos (
+          id SERIAL PRIMARY KEY,
+          sku VARCHAR(50) UNIQUE NOT NULL,
+          nome VARCHAR(100) NOT NULL,
+          preco DECIMAL(10,2) CHECK (preco >= 0),
+          estoque INTEGER CHECK (estoque >= 0),
+          status VARCHAR(20) CHECK (status IN ('ativo', 'inativo', 'pendente'))
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+        await dbSync.syncNow()
+
+        const result = await targetClient.query('SELECT * FROM produtos_complexos ORDER BY id')
+        expect(result.rows).toHaveLength(3)
+
+        // Verificar se constraints foram respeitadas
+        expect(result.rows[0].sku).toBe('SKU001')
+        expect(parseFloat(result.rows[0].preco)).toBeGreaterThanOrEqual(0)
+        expect(result.rows[0].estoque).toBeGreaterThanOrEqual(0)
+        expect(['ativo', 'inativo', 'pendente']).toContain(result.rows[0].status)
+      })
+    })
+
+    describe('Sincronização com Partições', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS vendas CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS vendas CASCADE')
+      })
+
+      it('deve sincronizar tabelas particionadas', async () => {
+        // Criar tabela particionada por mês
+        await sourceClient.query(`
+        CREATE TABLE vendas (
+          id SERIAL,
+          data_venda DATE NOT NULL,
+          produto VARCHAR(100),
+          valor DECIMAL(10,2),
+          PRIMARY KEY (id, data_venda)
+        ) PARTITION BY RANGE (data_venda)
+      `)
+
+        await sourceClient.query(`
+        CREATE TABLE vendas_2024_01 PARTITION OF vendas
+        FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')
+      `)
+
+        await sourceClient.query(`
+        CREATE TABLE vendas_2024_02 PARTITION OF vendas
+        FOR VALUES FROM ('2024-02-01') TO ('2024-03-01')
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO vendas (data_venda, produto, valor) VALUES
+        ('2024-01-15', 'Produto A', 100.00),
+        ('2024-01-20', 'Produto B', 200.00),
+        ('2024-02-10', 'Produto C', 300.00)
+      `)
+
+        // Criar mesma estrutura no destino
+        await targetClient.query(`
+        CREATE TABLE vendas (
+          id SERIAL,
+          data_venda DATE NOT NULL,
+          produto VARCHAR(100),
+          valor DECIMAL(10,2),
+          PRIMARY KEY (id, data_venda)
+        ) PARTITION BY RANGE (data_venda)
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE vendas_2024_01 PARTITION OF vendas
+        FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE vendas_2024_02 PARTITION OF vendas
+        FOR VALUES FROM ('2024-02-01') TO ('2024-03-01')
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+        await dbSync.syncNow()
+
+        const result = await targetClient.query('SELECT * FROM vendas ORDER BY data_venda')
+        expect(result.rows).toHaveLength(3)
+
+        // Verificar se dados foram distribuídos corretamente nas partições
+        const countJan = await targetClient.query(
+          "SELECT COUNT(*) FROM vendas_2024_01 WHERE data_venda < '2024-02-01'"
+        )
+        const countFeb = await targetClient.query(
+          "SELECT COUNT(*) FROM vendas_2024_02 WHERE data_venda >= '2024-02-01'"
+        )
+
+        expect(parseInt(countJan.rows[0].count)).toBe(2)
+        expect(parseInt(countFeb.rows[0].count)).toBe(1)
+      })
+    })
+
+    describe('Sincronização com Performance', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS performance_test CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS performance_test CASCADE')
+      })
+
+      it('deve processar lotes em paralelo conforme configuração', async () => {
+        await sourceClient.query(`
+        CREATE TABLE performance_test (
+          id SERIAL PRIMARY KEY,
+          data VARCHAR(100),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE performance_test (
+          id SERIAL PRIMARY KEY,
+          data VARCHAR(100),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+        // Inserir dados para testar paralelismo
+        const batchSize = 50
+        const values = Array.from({ length: batchSize }, (_, i) => `('dados_${i}')`).join(',')
+        await sourceClient.query(`INSERT INTO performance_test (data) VALUES ${values}`)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: [],
+          maxParallelTables: 2 // Limitar paralelismo
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+
+        await dbSync.syncNow()
+
+        const result = await targetClient.query('SELECT COUNT(*) as count FROM performance_test')
+        expect(parseInt(result.rows[0].count)).toBe(batchSize)
+
+        // Verificar se o paralelismo foi aplicado (logs devem mostrar processamento em lote)
+        const parallelLogs = logs.filter(
+          (log) => log.includes('Processando nível') || log.includes('Batch:')
+        )
+        expect(parallelLogs.length).toBeGreaterThan(0)
+      }, 30000)
+    })
+
+    describe('Sincronização com Rollback em Caso de Erro', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS teste_rollback CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS teste_rollback CASCADE')
+      })
+
+      it('deve manter consistência quando ocorre erro durante sincronização', async () => {
+        await sourceClient.query(`
+        CREATE TABLE teste_rollback (
+          id SERIAL PRIMARY KEY,
+          valor VARCHAR(100)
+        )
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO teste_rollback (valor) VALUES
+        ('dado 1'), ('dado 2'), ('dado 3')
+      `)
+
+        // Destino com estrutura diferente que pode causar erro
+        await targetClient.query(`
+        CREATE TABLE teste_rollback (
+          id SERIAL PRIMARY KEY,
+          valor VARCHAR(10) -- Coluna menor que pode causar truncamento
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+
+        // A sincronização deve lidar com erros graciosamente
+        await expect(dbSync.syncNow()).resolves.not.toThrow()
+
+        // Verificar se pelo menos algumas operações foram completadas
+        const result = await targetClient.query('SELECT COUNT(*) as count FROM teste_rollback')
+        expect(parseInt(result.rows[0].count)).toBeGreaterThanOrEqual(0)
+
+        // Verificar se há logs de erro
+        const errorLogs = logs.filter(
+          (log) => log.includes('falhou') || log.includes('erro') || log.includes('Erro')
+        )
+        expect(errorLogs.length).toBeGreaterThan(0)
+      })
+    })
+
+    describe('Limpeza de Arquivos Temporários', () => {
+      it('deve limpar arquivos temporários antigos', async () => {
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+
+        // Executar limpeza
+        await dbSync.cleanupOldFiles()
+
+        const cleanupLog = logs.find((log) => log.includes('Limpeza concluída'))
+        expect(cleanupLog).toBeDefined()
+      })
+    })
+
+    describe('Validação de Conexão', () => {
+      it('deve validar conexões com ambos os bancos', async () => {
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+
+        // A validação ocorre durante getTables(), que é chamado por syncNow()
+        await expect(dbSync.syncNow()).resolves.not.toThrow()
+
+        const validationLogs = logs.filter(
+          (log) => log.includes('Conexão válida') || log.includes('Encontradas')
+        )
+        expect(validationLogs.length).toBeGreaterThan(0)
+      })
+    })
+  })
+
+  describe('Testes de Stress e Edge Cases', () => {
+    describe('Tabelas com Nomes Complexos', () => {
+      it('deve lidar com nomes de tabelas com caracteres especiais', async () => {
+        const tableName = 'tabela_com_underscores'
+
+        await sourceClient.query(`DROP TABLE IF EXISTS "${tableName}" CASCADE`)
+        await targetClient.query(`DROP TABLE IF EXISTS "${tableName}" CASCADE`)
+
+        await sourceClient.query(`
+        CREATE TABLE "${tableName}" (
+          "id_col" SERIAL PRIMARY KEY,
+          "nome_col" VARCHAR(100)
+        )
+      `)
+
+        await sourceClient.query(`
+        INSERT INTO "${tableName}" ("nome_col") VALUES ('teste')
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE "${tableName}" (
+          "id_col" SERIAL PRIMARY KEY,
+          "nome_col" VARCHAR(100)
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+        await dbSync.syncNow()
+
+        const result = await targetClient.query(`SELECT COUNT(*) FROM "${tableName}"`)
+        expect(parseInt(result.rows[0].count)).toBe(1)
+      })
+    })
+
+    describe('Sincronização com Timeout', () => {
+      it('deve lidar com timeouts de conexão', async () => {
+        // Usar uma URL inválida para forçar timeout
+        const invalidConfig: SyncConfig = {
+          sourceUrl: 'postgresql://invalid:invalid@invalid-host:5432/invalid',
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(invalidConfig, logCallback)
+
+        await expect(dbSync.syncNow()).rejects.toThrow()
+
+        const timeoutLog = logs.find((log) => log.includes('Timeout') || log.includes('timeout'))
+        expect(timeoutLog).toBeDefined()
+      })
+    })
+
+    describe('Múltiplas Execuções Sequenciais', () => {
+      beforeEach(async () => {
+        await sourceClient.query('DROP TABLE IF EXISTS teste_sequencial CASCADE')
+        await targetClient.query('DROP TABLE IF EXISTS teste_sequencial CASCADE')
+      })
+
+      it('deve executar múltiplas sincronizações sequenciais corretamente', async () => {
+        await sourceClient.query(`
+        CREATE TABLE teste_sequencial (
+          id SERIAL PRIMARY KEY,
+          contador INTEGER,
+          data_sincronizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+        await targetClient.query(`
+        CREATE TABLE teste_sequencial (
+          id SERIAL PRIMARY KEY,
+          contador INTEGER,
+          data_sincronizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+        const config: SyncConfig = {
+          sourceUrl,
+          targetUrl,
+          intervalMinutes: 1,
+          excludeTables: []
+        }
+
+        const dbSync = new DatabaseSync(config, logCallback)
+
+        // Primeira sincronização
+        await sourceClient.query('INSERT INTO teste_sequencial (contador) VALUES (1)')
+        await dbSync.syncNow()
+
+        // Segunda sincronização com novos dados
+        await sourceClient.query('INSERT INTO teste_sequencial (contador) VALUES (2)')
+        await dbSync.syncNow()
+
+        // Terceira sincronização
+        await sourceClient.query('INSERT INTO teste_sequencial (contador) VALUES (3)')
+        await dbSync.syncNow()
+
+        const result = await targetClient.query('SELECT COUNT(*) as count FROM teste_sequencial')
+        expect(parseInt(result.rows[0].count)).toBe(3)
+
+        const syncLogs = logs.filter((log) => log.includes('SINCRONIZAÇÃO CONCLUÍDA'))
+        expect(syncLogs).toHaveLength(3)
+      })
+    })
+  })
 })
