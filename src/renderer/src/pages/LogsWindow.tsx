@@ -1,9 +1,12 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { X } from 'lucide-react'
+import { Copy, X } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@renderer/components/primitive/card'
 import { Button } from '@renderer/components/primitive/button'
+import { useToast } from '@renderer/components/provider/toastProvider'
 
 const LogsWindow: React.FC = () => {
+  const toast = useToast()
+
   const [logs, setLogs] = useState<string[]>([])
   const [isRunning, setIsRunning] = useState(false)
   const logsContainerRef = useRef<HTMLDivElement>(null)
@@ -89,14 +92,31 @@ const LogsWindow: React.FC = () => {
     }
   }, [])
 
-  const clearLogs = async () => {
-    setLogs([])
-    shouldAutoScrollRef.current = true
+  // const clearLogs = async () => {
+  //   setLogs([])
+  //   shouldAutoScrollRef.current = true
+  //   try {
+  //     await window.electron.ipcRenderer.invoke('clear-logs')
+  //     console.log('[FRONTEND] Logs limpos')
+  //   } catch (error) {
+  //     console.error('[FRONTEND] Erro ao limpar logs:', error)
+  //   }
+  // }
+
+  const copyLogs = async () => {
     try {
-      await window.electron.ipcRenderer.invoke('clear-logs')
-      console.log('[FRONTEND] Logs limpos')
+      if (logs.length === 0) {
+        toast.info('Nenhum log para copiar')
+        return
+      }
+
+      await navigator.clipboard.writeText(logs.join('\n'))
+
+      toast.success('Logs copiados para a área de transferência')
     } catch (error) {
-      console.error('[FRONTEND] Erro ao limpar logs:', error)
+      console.error('[FRONTEND] Erro ao copiar logs:', error)
+
+      toast.error('Erro ao copiar logs')
     }
   }
 
@@ -114,8 +134,12 @@ const LogsWindow: React.FC = () => {
             </div>
           </CardTitle>
           <div className="flex gap-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-            <Button size="sm" variant="outline" onClick={clearLogs}>
+            {/* <Button size="sm" variant="outline" onClick={clearLogs}>
               🗑️ Limpar
+            </Button> */}
+
+            <Button size="sm" variant="outline" onClick={copyLogs}>
+              <Copy /> Copiar
             </Button>
 
             <Button

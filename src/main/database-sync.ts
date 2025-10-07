@@ -721,6 +721,7 @@ export class DatabaseSync {
       this.log(`✓ SQL limpo salvo em ${sqlFile}`)
 
       this.log(`Restaurando dados para "${table}" com psql...`)
+
       const psqlArgs = [
         `--host=${targetParams.host}`,
         `--port=${targetParams.port}`,
@@ -728,7 +729,6 @@ export class DatabaseSync {
         `--dbname=${targetParams.database}`,
         '--no-password',
         '--single-transaction',
-        '--disable-triggers',
         '--file=' + sqlFile
       ]
 
@@ -741,6 +741,11 @@ export class DatabaseSync {
       const { stdout, stderr } = await this.executeCommand('psql', psqlArgs, psqlEnv, 300000)
       if (stdout) this.log(`[psql:stdout] ${stdout}`)
       if (stderr) this.log(`[psql:stderr] ${stderr}`)
+
+      if (stderr && (stderr.includes('ERROR:') || stderr.includes('duplicate key'))) {
+        throw new Error(`Restore falhou com erros na transação`)
+      }
+
       this.log(`✓ Restore concluído para "${table}"`)
 
       await fs.unlink(sqlFile).catch(() => {})
