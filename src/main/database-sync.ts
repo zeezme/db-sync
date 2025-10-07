@@ -161,8 +161,8 @@ export class DatabaseSync {
         port: parseInt(urlObj.port) || 5432,
         database: urlObj.pathname.replace('/', ''),
         ssl: isLocalhost ? false : { rejectUnauthorized: false },
-        connectionTimeoutMillis: 30000,
-        idle_in_transaction_session_timeout: 30000
+        connectionTimeoutMillis: 30000
+        // idle_in_transaction_session_timeout: 30000
       }
     } catch (error) {
       throw new Error(`Erro ao analisar URL do banco de dados (${url}): ${error}`)
@@ -636,7 +636,8 @@ export class DatabaseSync {
       '--no-owner',
       '--no-privileges',
       `--table="${table}"`,
-      `--file=${dumpFile}`
+      `--file=${dumpFile}`,
+      '--no-sync'
     ]
 
     const env: NodeJS.ProcessEnv = {
@@ -701,30 +702,51 @@ export class DatabaseSync {
       const commonCols = await this.getCommonColumns('pessoa')
       this.log(`🔍 [DEBUG] Colunas comuns de pessoa: ${commonCols.join(', ')}`)
     }
-    try {
-      this.log(`Tentando restore direto para "${table}"...`)
 
-      const args = [
-        `--dbname=postgresql://${targetParams.user}:${targetParams.password}@${targetParams.host}:${targetParams.port}/${targetParams.database}`,
+    const sqlFile = dumpFile.replace('.dump', '.sql')
+
+    try {
+      this.log(`Convertendo dump para SQL para "${table}"...`)
+      await this.executeCommand(
+        'pg_restore',
+        ['--data-only', '--file=' + sqlFile, dumpFile],
+        { ...process.env },
+        300000
+      )
+
+      this.log(`Removendo transaction_timeout do dump...`)
+      let sqlContent = await fs.readFile(sqlFile, 'utf8')
+      sqlContent = sqlContent.replace(/SET transaction_timeout = 0;\s*/g, '')
+      await fs.writeFile(sqlFile, sqlContent, 'utf8')
+      this.log(`✓ SQL limpo salvo em ${sqlFile}`)
+
+      this.log(`Restaurando dados para "${table}" com psql...`)
+      const psqlArgs = [
+        `--host=${targetParams.host}`,
+        `--port=${targetParams.port}`,
+        `--username=${targetParams.user}`,
+        `--dbname=${targetParams.database}`,
         '--no-password',
-        '--data-only',
         '--single-transaction',
-        '--no-owner',
-        '--no-privileges',
-        '--verbose',
-        dumpFile
+        '--disable-triggers',
+        '--file=' + sqlFile
       ]
 
-      const env: NodeJS.ProcessEnv = {
+      const psqlEnv: NodeJS.ProcessEnv = {
         ...process.env,
+        PGPASSWORD: String(targetParams.password) || '',
         PGSSLMODE: targetParams.ssl ? 'require' : 'prefer'
       }
 
-      await this.executeCommand('pg_restore', args, env, 300000)
-      this.log(`✓ Restore direto concluído para "${table}"`)
-      return
+      const { stdout, stderr } = await this.executeCommand('psql', psqlArgs, psqlEnv, 300000)
+      if (stdout) this.log(`[psql:stdout] ${stdout}`)
+      if (stderr) this.log(`[psql:stderr] ${stderr}`)
+      this.log(`✓ Restore concluído para "${table}"`)
+
+      await fs.unlink(sqlFile).catch(() => {})
     } catch (error: any) {
       this.log(`Restore direto falhou para "${table}": ${error.message}`)
+      await fs.unlink(sqlFile).catch(() => {})
 
       try {
         await this.restoreWithUpsert(table, dumpFile, primaryKey)
@@ -732,15 +754,7 @@ export class DatabaseSync {
         return
       } catch (upsertError: any) {
         this.log(`UPSERT falhou para "${table}": ${upsertError.message}`)
-
-        try {
-          await this.restoreWithInsertIgnore(table, dumpFile)
-          this.log(`✓ INSERT IGNORE concluído para "${table}"`)
-          return
-        } catch (ignoreError: any) {
-          this.log(`INSERT IGNORE falhou para "${table}": ${ignoreError.message}`)
-          throw new Error(`Todos os métodos de restauração falharam para "${table}"`)
-        }
+        throw new Error(`Todos os métodos de restauração falharam para "${table}"`)
       }
     }
   }

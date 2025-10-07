@@ -121,7 +121,7 @@ const LogsWindow: React.FC = () => {
             <Button
               size="sm"
               variant="ghost"
-              className="hover:bg-transparent text-red-500 hover:text-red-700"
+              className="hover:bg-transparent"
               onClick={async () => await window.electron.ipcRenderer.invoke('close-window')}
             >
               <X />

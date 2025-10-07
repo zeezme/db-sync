@@ -19,6 +19,7 @@ import { useToast } from '@renderer/components/provider/toastProvider'
 import { Database, GitMerge, X } from 'lucide-react'
 import { Spinner } from '@renderer/components/primitive/spinner'
 import { InputListForm } from '@renderer/components/form/inputListForm'
+import { ThemeToggler } from '@renderer/components/generic/themeToggler'
 
 const STORAGE_KEY = 'dbsync-config'
 
@@ -193,15 +194,15 @@ const ConfigSection: React.FC = () => {
             <div className="flex justify-between items-center">
               <CardTitle>
                 <div className="flex items-center gap-2">
-                  <Database className="text-green-600" />
-                  <GitMerge className="text-green-600" />
-                  <p className="text-xl text-green-600">Windel Sync</p>
+                  <Database className="text-black dark:text-white" />
+                  <GitMerge className="text-black dark:text-white" />
+                  <p className="text-xl text-black dark:text-white">Windel Sync</p>
                 </div>
               </CardTitle>
 
               <Button
                 variant="ghost"
-                className="hover:bg-transparent text-red-500 hover:text-red-700 hover:scale-105"
+                className="hover:bg-transparent text-black hover:text-black hover:scale-105 dark:text-white dark:hover:bg-gray-500"
                 style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 onClick={handleCloseWindow}
                 disabled={loadingClose}
@@ -316,6 +317,8 @@ const ConfigSection: React.FC = () => {
             <Button variant="outline" onClick={openLogsWindow} disabled={loadingLogs}>
               {loadingLogs ? <Spinner /> : '📋 Abrir Logs'}
             </Button>
+
+            <ThemeToggler />
           </CardFooter>
         </Card>
       </div>
