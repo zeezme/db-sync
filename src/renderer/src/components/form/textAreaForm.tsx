@@ -1,54 +1,63 @@
 import * as React from 'react'
-import { useFormContext } from 'react-hook-form'
-import { cn } from '@renderer/lib/utils'
+import { Controller, FieldValues, FieldPath, ControllerProps } from 'react-hook-form'
+import { Textarea } from '../primitive/textarea'
 
-interface TextareaFormProps extends Omit<React.ComponentProps<'textarea'>, 'name'> {
-  name: string
+interface TextareaFormProps<TFieldValues extends FieldValues>
+  extends Omit<React.ComponentProps<'textarea'>, 'name' | 'defaultValue'> {
+  control: ControllerProps<TFieldValues>['control']
+  name: FieldPath<TFieldValues>
   label?: string
   helperText?: string
   showError?: boolean
 }
 
-function TextareaForm({
+function TextareaForm<TFieldValues extends FieldValues>({
+  control,
   name,
   label,
   helperText,
   showError = true,
   className,
   ...props
-}: TextareaFormProps) {
-  const {
-    register,
-    formState: { errors }
-  } = useFormContext()
-
-  const error = errors[name]
-  const errorMessage = error?.message as string | undefined
-
+}: TextareaFormProps<TFieldValues>) {
   return (
-    <div className="flex flex-col gap-1.5">
-      {label && (
-        <label htmlFor={name} className="text-sm font-medium text-foreground">
-          {label}
-        </label>
-      )}
+    <Controller
+      control={control}
+      name={name}
+      render={({ field, fieldState: { error } }) => {
+        const errorMessage = error?.message as string | undefined
 
-      <textarea
-        id={name}
-        data-slot="textarea"
-        aria-invalid={!!error}
-        className={cn(
-          'border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:bg-input/30 flex field-sizing-content min-h-16 w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm',
-          className
-        )}
-        {...register(name)}
-        {...props}
-      />
+        return (
+          <div className="flex flex-col gap-1.5">
+            {label && (
+              <label htmlFor={name} className="text-sm font-medium text-foreground">
+                {label}
+              </label>
+            )}
 
-      {helperText && !error && <p className="text-xs text-muted-foreground">{helperText}</p>}
+            <Textarea
+              id={name}
+              data-slot="textarea"
+              aria-invalid={!!error}
+              className={className}
+              value={field.value ?? ''}
+              onChange={field.onChange}
+              onBlur={field.onBlur}
+              ref={field.ref}
+              {...props}
+            />
 
-      {showError && errorMessage && <p className="text-xs text-destructive">{errorMessage}</p>}
-    </div>
+            {helperText && !error && (
+              <p className="text-xs text-muted-foreground">{helperText}</p>
+            )}
+
+            {showError && errorMessage && (
+              <p className="text-xs text-destructive">{errorMessage}</p>
+            )}
+          </div>
+        )
+      }}
+    />
   )
 }
 

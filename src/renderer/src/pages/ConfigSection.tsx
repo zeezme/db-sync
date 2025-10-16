@@ -16,10 +16,11 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import z from 'zod'
 import { FileSelectorForm } from '@renderer/components/form/fileSelectorForm'
 import { useToast } from '@renderer/components/provider/toastProvider'
-import { Database, GitMerge, X } from 'lucide-react'
+import { Check, CloudCheck, Database, GitMerge, Notebook, Play, X } from 'lucide-react'
 import { Spinner } from '@renderer/components/primitive/spinner'
 import { InputListForm } from '@renderer/components/form/inputListForm'
 import { ThemeToggler } from '@renderer/components/generic/themeToggler'
+import { SwitchForm } from '@renderer/components/form/switchForm'
 
 const STORAGE_KEY = 'dbsync-config'
 
@@ -28,7 +29,9 @@ const configSchema = z.object({
   targetUrl: z.string().min(1, 'URL de destino é obrigatória'),
   intervalMinutes: z.number().min(1, 'Mínimo 1 minuto').max(1440, 'Máximo 1440 minutos (24h)'),
   excludeTables: z.string(),
-  backendDir: z.string()
+  backendDir: z.string(),
+  sourceSSLEnabled: z.boolean(),
+  targetSSLEnabled: z.boolean()
 })
 
 type ConfigFormData = z.infer<typeof configSchema>
@@ -50,23 +53,31 @@ const ConfigSection: React.FC = () => {
       targetUrl: '',
       intervalMinutes: 120,
       excludeTables: '',
-      backendDir: ''
+      backendDir: '',
+      sourceSSLEnabled: true,
+      targetSSLEnabled: true
     }
   })
 
-  const { watch, setValue, handleSubmit } = methods
+  const { watch, setValue, handleSubmit, setError, control } = methods
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY)
 
     if (saved) {
       try {
-        const config: SyncConfig & { backendDir?: string } = JSON.parse(saved)
+        const config: SyncConfig & {
+          backendDir?: string
+          sourceSSLEnabled?: boolean
+          targetSSLEnabled?: boolean
+        } = JSON.parse(saved)
         setValue('sourceUrl', config.sourceUrl || '')
         setValue('targetUrl', config.targetUrl || '')
         setValue('intervalMinutes', config.intervalMinutes || 120)
         setValue('excludeTables', (config.excludeTables || []).join(', '))
         setValue('backendDir', config.backendDir || '')
+        setValue('sourceSSLEnabled', config.sourceSSLEnabled ?? true)
+        setValue('targetSSLEnabled', config.targetSSLEnabled ?? true)
       } catch {
         console.warn('Config inválida no localStorage')
       }
@@ -83,10 +94,13 @@ const ConfigSection: React.FC = () => {
           .split(',')
           .map((t) => t.trim())
           .filter(Boolean),
-        backendDir: value.backendDir || ''
+        backendDir: value.backendDir || '',
+        sourceSSLEnabled: value.sourceSSLEnabled ?? true,
+        targetSSLEnabled: value.targetSSLEnabled ?? true
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
     })
+
     return () => subscription.unsubscribe()
   }, [watch])
 
@@ -104,8 +118,6 @@ const ConfigSection: React.FC = () => {
   const startSync = handleSubmit(async (data) => {
     setLoadingSync(true)
 
-    await openLogsWindow()
-
     try {
       const config: SyncConfig = {
         sourceUrl: data.sourceUrl,
@@ -114,10 +126,26 @@ const ConfigSection: React.FC = () => {
         excludeTables: data.excludeTables
           .split(',')
           .map((t) => t.trim())
-          .filter(Boolean)
+          .filter(Boolean),
+        sourceSSLEnabled: data.sourceSSLEnabled,
+        targetSSLEnabled: data.targetSSLEnabled
       }
 
-      await dbSync.startSync(config)
+      const response = await dbSync.startSync(config)
+
+      if (!response.success) {
+        toast.error(`${response.error}`)
+
+        setError('sourceUrl', {
+          message: ''
+        })
+
+        setError('targetUrl', {
+          message: ''
+        })
+      } else {
+        await openLogsWindow()
+      }
     } finally {
       setLoadingSync(false)
     }
@@ -125,13 +153,15 @@ const ConfigSection: React.FC = () => {
 
   const testConnection = async (type: 'source' | 'target') => {
     const url = type === 'source' ? watch('sourceUrl') : watch('targetUrl')
+    const sslEnabled = type === 'source' ? watch('sourceSSLEnabled') : watch('targetSSLEnabled')
     const label = type === 'source' ? 'origem' : 'destino'
     const setLoading = type === 'source' ? setLoadingSourceTest : setLoadingTargetTest
 
     setLoading(true)
 
     try {
-      const res = await dbSync.testConnection(url)
+      const res = await dbSync.testConnection(url, sslEnabled)
+
       if (res.success) {
         toast.success(`Conexão ${label} OK!`)
       } else {
@@ -219,21 +249,32 @@ const ConfigSection: React.FC = () => {
                 label="Banco de Origem (DEV)"
                 placeholder="postgresql://user:pass@host:5432/database"
                 disabled={loadingSync}
+                control={control}
               />
 
-              <Button
-                variant="outline"
-                onClick={() => testConnection('source')}
-                disabled={loadingSourceTest || loadingSync}
-              >
-                {loadingSourceTest ? (
-                  <>
-                    Testar Conexão <Spinner />
-                  </>
-                ) : (
-                  'Testar Conexão'
-                )}
-              </Button>
+              <div className="flex gap-2 justify-between items-center">
+                <Button
+                  variant="outline"
+                  onClick={() => testConnection('source')}
+                  disabled={loadingSourceTest || loadingSync}
+                >
+                  {loadingSourceTest ? (
+                    <>
+                      <Check /> <Spinner />
+                    </>
+                  ) : (
+                    <Check size={20} />
+                  )}
+                </Button>
+
+                <SwitchForm
+                  label="SSL"
+                  id="sourceSSLEnabled"
+                  name="sourceSSLEnabled"
+                  disabled={loadingSync}
+                  control={control}
+                />
+              </div>
             </div>
 
             <div className="flex gap-2 items-end">
@@ -242,21 +283,32 @@ const ConfigSection: React.FC = () => {
                 label="Banco de Destino (LOCAL)"
                 placeholder="postgresql://user:pass@localhost:5432/database"
                 disabled={loadingSync}
+                control={control}
               />
 
-              <Button
-                variant="outline"
-                onClick={() => testConnection('target')}
-                disabled={loadingTargetTest || loadingSync}
-              >
-                {loadingTargetTest ? (
-                  <>
-                    Testar Conexão <Spinner />
-                  </>
-                ) : (
-                  'Testar Conexão'
-                )}
-              </Button>
+              <div className="flex gap-2 justify-between items-center">
+                <Button
+                  variant="outline"
+                  onClick={() => testConnection('target')}
+                  disabled={loadingTargetTest || loadingSync}
+                >
+                  {loadingTargetTest ? (
+                    <>
+                      <Check /> <Spinner />
+                    </>
+                  ) : (
+                    <Check size={20} />
+                  )}
+                </Button>
+
+                <SwitchForm
+                  label="SSL"
+                  id="targetSSLEnabled"
+                  name="targetSSLEnabled"
+                  disabled={loadingSync}
+                  control={control}
+                />
+              </div>
             </div>
 
             <InputForm
@@ -266,6 +318,7 @@ const ConfigSection: React.FC = () => {
               disabled={loadingSync}
               min={1}
               max={1440}
+              control={control}
             />
 
             <InputListForm
@@ -273,6 +326,7 @@ const ConfigSection: React.FC = () => {
               label="Tabelas que não serão sincronizadas"
               placeholder="Ex: migrations, schema_migrations"
               disabled={loadingSync}
+              control={control}
             />
 
             <FileSelectorForm
@@ -282,6 +336,7 @@ const ConfigSection: React.FC = () => {
               mode="directory"
               buttonText="Procurar..."
               disabled={loadingSync}
+              control={control}
             />
           </CardContent>
 
@@ -293,10 +348,12 @@ const ConfigSection: React.FC = () => {
             >
               {loadingSync ? (
                 <>
-                  ▶️ Iniciar Pull <Spinner />
+                  <Play /> Iniciar Pull <Spinner />
                 </>
               ) : (
-                '▶️ Iniciar Pull'
+                <>
+                  <Play /> Iniciar Pull
+                </>
               )}
             </Button>
 
@@ -307,15 +364,23 @@ const ConfigSection: React.FC = () => {
             >
               {loadingMigrations ? (
                 <>
-                  🛠️ Rodar Migrations <Spinner />
+                  <Database /> Rodar Migrations <Spinner />
                 </>
               ) : (
-                '🛠️ Rodar Migrations'
+                <>
+                  <Database /> Rodar Migrations
+                </>
               )}
             </Button>
 
             <Button variant="outline" onClick={openLogsWindow} disabled={loadingLogs}>
-              {loadingLogs ? <Spinner /> : '📋 Abrir Logs'}
+              {loadingLogs ? (
+                <Spinner />
+              ) : (
+                <>
+                  <Notebook /> Logs
+                </>
+              )}
             </Button>
 
             <ThemeToggler />

@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { useFormContext, useController } from 'react-hook-form'
+import { Controller, FieldValues, FieldPath, ControllerProps } from 'react-hook-form'
 import { cn } from '@renderer/lib/utils'
 import { Button } from '@renderer/components/primitive/button'
 import { X, Plus, ChevronDown } from 'lucide-react'
@@ -11,8 +11,9 @@ import {
   DropdownMenuItem
 } from '@renderer/components/primitive/dropdown-menu'
 
-interface InputListFormProps {
-  name: string
+interface InputListFormProps<TFieldValues extends FieldValues> {
+  control: ControllerProps<TFieldValues>['control']
+  name: FieldPath<TFieldValues>
   label?: string
   helperText?: string
   showError?: boolean
@@ -20,27 +21,56 @@ interface InputListFormProps {
   disabled?: boolean
 }
 
-function InputListForm({
+function InputListForm<TFieldValues extends FieldValues>({
+  control,
   name,
   label,
   helperText,
   showError = true,
   placeholder = 'Digite um item...',
   disabled = false
-}: InputListFormProps) {
-  const {
-    control,
-    formState: { errors }
-  } = useFormContext()
+}: InputListFormProps<TFieldValues>) {
+  return (
+    <Controller
+      control={control}
+      name={name}
+      render={({ field, fieldState: { error } }) => (
+        <InputListFormContent
+          field={field}
+          error={error}
+          name={name}
+          label={label}
+          helperText={helperText}
+          showError={showError}
+          placeholder={placeholder}
+          disabled={disabled}
+        />
+      )}
+    />
+  )
+}
 
-  const {
-    field: { value, onChange }
-  } = useController({
-    name,
-    control,
-    defaultValue: ''
-  })
+interface InputListFormContentProps {
+  field: any
+  error: any
+  name: string
+  label?: string
+  helperText?: string
+  showError: boolean
+  placeholder: string
+  disabled: boolean
+}
 
+function InputListFormContent({
+  field,
+  error,
+  name,
+  label,
+  helperText,
+  showError,
+  placeholder,
+  disabled
+}: InputListFormContentProps) {
   const [inputValue, setInputValue] = React.useState('')
   const [maxVisibleItems, setMaxVisibleItems] = React.useState<number>(0)
   const [inputError, setInputError] = React.useState<string | null>(null)
@@ -52,12 +82,12 @@ function InputListForm({
   const MAX_ITEM_LENGTH = 50
 
   const items = React.useMemo(() => {
-    if (!value || typeof value !== 'string') return []
-    return value
+    if (!field.value || typeof field.value !== 'string') return []
+    return field.value
       .split(',')
       .map((t) => t.trim())
       .filter(Boolean)
-  }, [value])
+  }, [field.value])
 
   React.useEffect(() => {
     badgeRefs.current = items.map(
@@ -142,19 +172,19 @@ function InputListForm({
 
     setInputError(null)
     const newItems = [...items, trimmed]
-    onChange(newItems.join(', '))
+    field.onChange(newItems.join(', '))
     setInputValue('')
-  }, [disabled, inputValue, items, onChange])
+  }, [disabled, inputValue, items, field])
 
   const handleRemove = React.useCallback(
     (itemToRemove: string) => {
       if (disabled) return
 
       const newItems = items.filter((t) => t !== itemToRemove)
-      onChange(newItems.join(', '))
+      field.onChange(newItems.join(', '))
       setInputError(null)
     },
-    [disabled, items, onChange]
+    [disabled, items, field]
   )
 
   const handleKeyDown = React.useCallback(
@@ -167,9 +197,7 @@ function InputListForm({
     [handleAdd]
   )
 
-  const error = errors[name]
   const errorMessage = error?.message as string | undefined
-
   const hiddenItems = items.slice(maxVisibleItems)
   const hiddenCount = hiddenItems.length
 

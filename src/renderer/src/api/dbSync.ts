@@ -4,6 +4,8 @@ export interface SyncConfig {
   targetUrl: string
   intervalMinutes: number
   excludeTables: string[]
+  sourceSSLEnabled: boolean
+  targetSSLEnabled: boolean
 }
 
 export const dbSync: {
@@ -12,7 +14,7 @@ export const dbSync: {
   startSync: (config: SyncConfig) => Promise<any>
   stopSync: () => Promise<any>
   triggerSync: () => Promise<any>
-  testConnection: (url: string) => Promise<any>
+  testConnection: (url: string, sslEnabled?: boolean) => Promise<any>
   onSyncLog: (callback: (log: string) => void) => void
 } = {
   saveConfig: (config) => (window as any).dbSync.saveConfig(config),
@@ -20,6 +22,6 @@ export const dbSync: {
   startSync: (config) => (window as any).dbSync.startSync(config),
   stopSync: () => (window as any).dbSync.stopSync(),
   triggerSync: () => (window as any).dbSync.triggerSync(),
-  testConnection: (url) => (window as any).dbSync.testConnection(url),
+  testConnection: (url, sslEnabled?: boolean) => (window as any).dbSync.testConnection(url, sslEnabled),
   onSyncLog: (callback) => (window as any).dbSync.onSyncLog(callback)
 }

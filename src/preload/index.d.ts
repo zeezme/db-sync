@@ -10,9 +10,16 @@ declare global {
       startSync: (config: any) => Promise<any>
       stopSync: () => Promise<any>
       triggerSync: () => Promise<any>
-      testConnection: (url: string) => Promise<any>
+      testConnection: (url: string, sslEnabled?: boolean) => Promise<any>
       runPrismaMigrations: (backendDir: string) => Promise<any>
       onSyncLog: (callback: (log: string) => void) => void
+      setSourceSSL: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+      setTargetSSL: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
+      getSSLStatus: () => Promise<{
+        success: boolean
+        status?: { source: boolean; target: boolean }
+        error?: string
+      }>
     }
     logsManager: {
       saveLogs: (log: string) => Promise<{ success: boolean }>

@@ -16,6 +16,8 @@ export interface SyncConfig {
   intervalMinutes: number
   excludeTables: string[]
   maxParallelTables?: number
+  sourceSSLEnabled?: boolean
+  targetSSLEnabled?: boolean
 }
 
 /**
@@ -67,9 +69,13 @@ export class DatabaseSync {
 
     this.config = {
       ...config,
-      maxParallelTables: config.maxParallelTables || 3
+      maxParallelTables: config.maxParallelTables || 3,
+      sourceSSLEnabled: config.sourceSSLEnabled ?? true,
+      targetSSLEnabled: config.targetSSLEnabled ?? true
     }
+
     this.logCallback = logCallback
+
     this.tempDir = path.join(tmpdir(), 'db-sync')
   }
 
@@ -81,11 +87,26 @@ export class DatabaseSync {
   private validateConfig(config: SyncConfig): void {
     const errors: string[] = []
 
-    if (!config.sourceUrl || !config.sourceUrl.startsWith('postgresql://')) {
+    const isValidPostgresUrl = (url?: string) => {
+      if (typeof url !== 'string') return false
+
+      try {
+        const parsed = new URL(url)
+        const validProtocol = ['postgres:', 'postgresql:'].includes(parsed.protocol)
+        const hasHost = !!parsed.hostname
+        const hasDatabase = !!parsed.pathname && parsed.pathname !== '/'
+
+        return validProtocol && hasHost && hasDatabase
+      } catch {
+        return false
+      }
+    }
+
+    if (!isValidPostgresUrl(config.sourceUrl)) {
       errors.push('sourceUrl deve ser uma URL PostgreSQL válida')
     }
 
-    if (!config.targetUrl || !config.targetUrl.startsWith('postgresql://')) {
+    if (!isValidPostgresUrl(config.targetUrl)) {
       errors.push('targetUrl deve ser uma URL PostgreSQL válida')
     }
 
@@ -151,6 +172,9 @@ export class DatabaseSync {
     try {
       const urlObj = new URL(url)
 
+      const isSourceUrl = url === this.config.sourceUrl
+      const sslEnabled = isSourceUrl ? this.config.sourceSSLEnabled : this.config.targetSSLEnabled
+
       const isLocalhost =
         urlObj.hostname.includes('localhost') || urlObj.hostname.includes('127.0.0.1')
 
@@ -160,9 +184,8 @@ export class DatabaseSync {
         host: urlObj.hostname,
         port: parseInt(urlObj.port) || 5432,
         database: urlObj.pathname.replace('/', ''),
-        ssl: isLocalhost ? false : { rejectUnauthorized: false },
+        ssl: isLocalhost || !sslEnabled ? false : { rejectUnauthorized: false },
         connectionTimeoutMillis: 30000
-        // idle_in_transaction_session_timeout: 30000
       }
     } catch (error) {
       throw new Error(`Erro ao analisar URL do banco de dados (${url}): ${error}`)
@@ -188,17 +211,12 @@ export class DatabaseSync {
 
     try {
       await client.connect()
-
       clearTimeout(connectionTimeout)
-
       await client.query('SELECT 1 as connectivity_test')
-
       return client
     } catch (error) {
       clearTimeout(connectionTimeout)
-
       await client.end().catch(() => {})
-
       throw new Error(`Falha na conexão com ${url}: ${error}`)
     }
   }
@@ -697,6 +715,7 @@ export class DatabaseSync {
     primaryKey: string
   ): Promise<void> {
     const targetParams = this.getConnectionParams(this.config.targetUrl)
+
     if (table === 'pessoa') {
       this.log(`🔍 [DEBUG] Processando tabela pessoa - PK: ${primaryKey}`)
       const commonCols = await this.getCommonColumns('pessoa')
@@ -973,161 +992,6 @@ export class DatabaseSync {
   }
 
   /**
-   * Restores data using INSERT IGNORE strategy
-   */
-  private async restoreWithInsertIgnore(table: string, dumpFile: string): Promise<void> {
-    const targetParams = this.getConnectionParams(this.config.targetUrl)
-    const sqlFile = dumpFile.replace('.dump', '.sql')
-
-    try {
-      const convertEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        PGPASSWORD: String(targetParams.password) || '',
-        PGSSLMODE: targetParams.ssl ? 'require' : 'prefer'
-      }
-
-      await this.executeCommand('pg_restore', ['--file=' + sqlFile, dumpFile], convertEnv, 300000)
-
-      let sqlContent = await fs.readFile(sqlFile, 'utf8')
-
-      sqlContent = this.convertCopyToInsertIgnore(sqlContent, table)
-
-      await fs.writeFile(sqlFile, sqlContent, 'utf8')
-
-      const args = [
-        `--host=${targetParams.host}`,
-        `--port=${targetParams.port}`,
-        `--username=${targetParams.user}`,
-        `--dbname=${targetParams.database}`,
-        '--no-password',
-        '--file=' + sqlFile
-      ]
-
-      const psqlEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        PGPASSWORD: String(targetParams.password) || '',
-        PGSSLMODE: targetParams.ssl ? 'require' : 'prefer'
-      }
-
-      await this.executeCommand('psql', args, psqlEnv, 300000)
-    } finally {
-      await fs.unlink(sqlFile).catch(() => {})
-    }
-  }
-
-  /**
-   * Converts COPY commands to UPSERT SQL
-   */
-  private convertCopyToUpsert(
-    sqlContent: string,
-    tableName: string,
-    primaryKey: string,
-    commonColumns: string[]
-  ): string {
-    const copyPattern = /COPY "([^"]+)" \(([^)]+)\) FROM stdin;\n([\s\S]*?)\n\\\./g
-
-    return sqlContent.replace(copyPattern, (match, extractedTableName, columns, data) => {
-      const actualTable = extractedTableName.split('.').pop() || extractedTableName
-      if (actualTable !== tableName) {
-        console.log(`[UPSERT LOG] Ignorando tabela ${actualTable}, não corresponde a ${tableName}`)
-        return match
-      }
-
-      const sourceColumnList = columns.split(', ').map((col) => col.replace(/"/g, ''))
-      const filteredColumns: string[] = []
-      const columnIndices: number[] = []
-
-      sourceColumnList.forEach((col, idx) => {
-        if (commonColumns.includes(col)) {
-          filteredColumns.push(col)
-          columnIndices.push(idx)
-        } else {
-          console.log(`[UPSERT LOG] Coluna "${col}" não existe no target e será ignorada`)
-        }
-      })
-
-      if (filteredColumns.length === 0) {
-        console.log(
-          `[UPSERT LOG] Nenhuma coluna compatível encontrada para a tabela "${tableName}", pulando inserção`
-        )
-        return '-- Nenhuma coluna compatível encontrada, pulando...'
-      }
-
-      const rows = data
-        .split('\n')
-        .filter((line) => line.trim() && !line.startsWith('\\'))
-        .map((line, idx) => {
-          const values = line.split('\t')
-          const filteredValues = columnIndices.map((i) => {
-            const val = values[i]
-            if (val === '\\N') return 'NULL'
-            return `'${val.replace(/'/g, "''")}'`
-          })
-          if (idx < 5) {
-            console.log(`[UPSERT LOG] Linha ${idx + 1} processada: (${filteredValues.join(', ')})`)
-          }
-          return `(${filteredValues.join(', ')})`
-        })
-
-      console.log(`[UPSERT LOG] Total de linhas processadas para "${tableName}": ${rows.length}`)
-
-      if (rows.length === 0) {
-        console.log(`[UPSERT LOG] Nenhuma linha para inserir para a tabela "${tableName}"`)
-        return '-- Nenhuma linha para inserir'
-      }
-
-      const upsertSQL =
-        `INSERT INTO "${tableName}" (${filteredColumns.map((col) => `"${col}"`).join(', ')})\n` +
-        `VALUES\n${rows.join(',\n')}\n` +
-        `ON CONFLICT ("${primaryKey}") DO UPDATE SET\n` +
-        filteredColumns
-          .filter((col) => col !== primaryKey)
-          .map((col) => `  "${col}" = EXCLUDED."${col}"`)
-          .join(',\n') +
-        ';\n'
-
-      console.log(
-        `[UPSERT LOG] INSERT gerado com ${rows.length} linhas e ${filteredColumns.length} colunas para "${tableName}"`
-      )
-
-      return upsertSQL
-    })
-  }
-
-  /**
-   * Converts COPY commands to INSERT IGNORE SQL
-   */
-  private convertCopyToInsertIgnore(sqlContent: string, tableName: string): string {
-    const copyPattern = /COPY "([^"]+)" \(([^)]+)\) FROM stdin;\n([\s\S]*?)\n\\\./g
-
-    return sqlContent.replace(copyPattern, (match, extractedTableName, columns, data) => {
-      if (extractedTableName !== tableName) return match
-
-      const columnList = columns.split(', ').map((col) => col.replace(/"/g, ''))
-
-      const valueLines = data
-        .split('\n')
-        .filter((line) => line.trim() && !line.startsWith('\\'))
-        .map((line) => {
-          const values = line.split('\t').map((val) => {
-            if (val === '\\N') return 'NULL'
-            return `'${val.replace(/'/g, "''")}'`
-          })
-          return `    (${values.join(', ')})`
-        })
-
-      if (valueLines.length === 0) return ''
-
-      const insertSQL =
-        `INSERT INTO "${extractedTableName}" (${columnList.map((col) => `"${col}"`).join(', ')})\n` +
-        `VALUES\n${valueLines.join(',\n')}\n` +
-        `ON CONFLICT DO NOTHING;`
-
-      return insertSQL
-    })
-  }
-
-  /**
    * Synchronizes a single table
    */
   private async syncTable(
@@ -1361,6 +1225,34 @@ export class DatabaseSync {
     )
 
     this.log(`✓ Sincronização agendada iniciada`)
+  }
+
+  /**
+   * Ativa ou desativa SSL para a conexão source
+   * @param enabled - true para ativar SSL, false para desativar
+   */
+  setSourceSSL(enabled: boolean): void {
+    this.config.sourceSSLEnabled = enabled
+    this.log(`SSL do source ${enabled ? 'ativado' : 'desativado'}`)
+  }
+
+  /**
+   * Ativa ou desativa SSL para a conexão target
+   * @param enabled - true para ativar SSL, false para desativar
+   */
+  setTargetSSL(enabled: boolean): void {
+    this.config.targetSSLEnabled = enabled
+    this.log(`SSL do target ${enabled ? 'ativado' : 'desativado'}`)
+  }
+
+  /**
+   * Obtém status atual do SSL para source e target
+   */
+  getSSLStatus(): { source: boolean; target: boolean } {
+    return {
+      source: this.config.sourceSSLEnabled ?? true,
+      target: this.config.targetSSLEnabled ?? true
+    }
   }
 
   /**

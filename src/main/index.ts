@@ -90,13 +90,24 @@ function registerHandlers(): void {
         }
       })
 
+      if (config.sourceSSLEnabled !== undefined) {
+        dbSync.setSourceSSL(config.sourceSSLEnabled)
+      }
+
+      if (config.targetSSLEnabled !== undefined) {
+        dbSync.setTargetSSL(config.targetSSLEnabled)
+      }
+
       await dbSync.startScheduled()
+
       return { success: true }
     } catch (error) {
       isSyncRunning = false
+
       if (logsWindow && !logsWindow.isDestroyed()) {
         logsWindow.webContents.send('sync-end')
       }
+
       return { success: false, error: (error as Error).message }
     }
   })
@@ -107,6 +118,7 @@ function registerHandlers(): void {
         dbSync.stop()
         dbSync = null
       }
+
       isSyncRunning = false
 
       if (logsWindow && !logsWindow.isDestroyed()) {
@@ -124,23 +136,33 @@ function registerHandlers(): void {
       if (!dbSync) {
         return { success: false, error: 'Sincronização não está ativa' }
       }
+
       await dbSync.syncNow()
+
       return { success: true }
     } catch (error) {
       return { success: false, error: (error as Error).message }
     }
   })
 
-  ipcMain.handle('test-connection', async (_event, connectionString: string) => {
+  ipcMain.handle('test-connection', async (_event, data: { url: string; sslEnabled: boolean }) => {
     try {
-      const isLocal =
-        connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
+      const { url, sslEnabled } = data
+
+      if (!url) {
+        return { success: false, error: 'Connection string é obrigatória' }
+      }
+
+      const isLocal = url.includes('localhost') || url.includes('127.0.0.1')
+
       const client = new Client({
-        connectionString,
-        ssl: isLocal ? false : { rejectUnauthorized: false }
+        connectionString: url,
+        ssl: isLocal || !sslEnabled ? false : { rejectUnauthorized: false }
       })
+
       await client.connect()
       await client.end()
+
       return { success: true }
     } catch (error) {
       return { success: false, error: (error as Error).message }
@@ -189,6 +211,42 @@ function registerHandlers(): void {
     }
   })
 
+  ipcMain.handle('set-source-ssl', async (_event, enabled: boolean) => {
+    try {
+      if (dbSync) {
+        dbSync.setSourceSSL(enabled)
+        return { success: true }
+      }
+      return { success: false, error: 'Sincronização não está ativa' }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle('set-target-ssl', async (_event, enabled: boolean) => {
+    try {
+      if (dbSync) {
+        dbSync.setTargetSSL(enabled)
+        return { success: true }
+      }
+      return { success: false, error: 'Sincronização não está ativa' }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  ipcMain.handle('get-ssl-status', async () => {
+    try {
+      if (dbSync) {
+        const status = dbSync.getSSLStatus()
+        return { success: true, status }
+      }
+      return { success: false, error: 'Sincronização não está ativa' }
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
   handlersRegistered = true
   console.log('All handlers registered successfully')
 }
@@ -196,7 +254,10 @@ function registerHandlers(): void {
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1000,
-    height: 650,
+    height: 520,
+    minWidth: 1000,
+    minHeight: 520,
+    maxHeight: 520,
     maximizable: false,
     show: false,
     frame: false,

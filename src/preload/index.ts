@@ -13,11 +13,29 @@ if (process.contextIsolated) {
       startSync: (config: any) => ipcRenderer.invoke('start-sync', config),
       stopSync: () => ipcRenderer.invoke('stop-sync'),
       triggerSync: () => ipcRenderer.invoke('trigger-sync'),
-      testConnection: (url: string) => ipcRenderer.invoke('test-connection', url),
+      testConnection: (url: string, sslEnabled: boolean) => {
+        return ipcRenderer.invoke('test-connection', {
+          url: url,
+          sslEnabled: sslEnabled
+        })
+      },
       runPrismaMigrations: (backendDir: string) =>
         ipcRenderer.invoke('run-prisma-migrations', backendDir),
       onSyncLog: (callback: (log: string) => void) => {
         ipcRenderer.on('sync-log', (_event, log) => callback(log))
+      },
+      setSourceSSL: async (enabled: boolean): Promise<{ success: boolean; error?: string }> => {
+        return await ipcRenderer.invoke('set-source-ssl', enabled)
+      },
+      setTargetSSL: async (enabled: boolean): Promise<{ success: boolean; error?: string }> => {
+        return await ipcRenderer.invoke('set-target-ssl', enabled)
+      },
+      getSSLStatus: async (): Promise<{
+        success: boolean
+        status?: { source: boolean; target: boolean }
+        error?: string
+      }> => {
+        return await ipcRenderer.invoke('get-ssl-status')
       }
     })
     contextBridge.exposeInMainWorld('logsManager', {
