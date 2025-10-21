@@ -610,25 +610,6 @@ export class DatabaseSync {
   }
 
   /**
-   * Gets the last synchronization time for a table
-   */
-  private async getLastSyncTime(table: string): Promise<Date | null> {
-    const client = await this.createClient(this.config.targetUrl)
-
-    try {
-      const result = await client.query(`
-        SELECT MAX(updated_at) as last_sync FROM "${table}" WHERE updated_at IS NOT NULL
-      `)
-      return result.rows[0]?.last_sync || null
-    } catch (error) {
-      this.log(`Erro ao obter last sync de ${table}: ${error}`)
-      return null
-    } finally {
-      await client.end()
-    }
-  }
-
-  /**
    * Dumps table data to a temporary file
    */
   private async dumpTableData(table: string): Promise<string> {
@@ -992,6 +973,85 @@ export class DatabaseSync {
   }
 
   /**
+   * Synchronizes sequences for a table
+   */
+  private async syncTableSequences(table: string): Promise<void> {
+    const sourceClient = await this.createClient(this.config.sourceUrl)
+    const targetClient = await this.createClient(this.config.targetUrl)
+
+    try {
+      const formattedTable = `"${table}"`
+
+      const sequencesQuery = `
+      SELECT DISTINCT
+        CASE 
+          WHEN pg_get_serial_sequence($1, column_name) IS NOT NULL 
+          THEN pg_get_serial_sequence($1, column_name)
+          ELSE SUBSTRING(column_default FROM 'nextval\\(''([^'']+)')
+        END as sequence_name,
+        column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' 
+        AND table_name = $1
+        AND (
+          pg_get_serial_sequence($1, column_name) IS NOT NULL
+          OR column_default LIKE '%nextval%'
+        )
+    `
+
+      const sequencesResult = await sourceClient.query(sequencesQuery, [table])
+
+      if (sequencesResult.rows.length === 0) {
+        return
+      }
+
+      for (const row of sequencesResult.rows) {
+        if (!row.sequence_name || !row.column_name) continue
+
+        const sequenceName = row.sequence_name.replace('public.', '')
+        const columnName = row.column_name
+
+        try {
+          const formattedSequence = `"${sequenceName}"`
+
+          const sourceSeqValue = await sourceClient.query(
+            `SELECT last_value, is_called FROM ${formattedSequence}`
+          )
+          const lastValue = sourceSeqValue.rows[0]?.last_value
+          const isCalled = sourceSeqValue.rows[0]?.is_called
+
+          const maxValueResult = await targetClient.query(
+            `SELECT COALESCE(MAX("${columnName}"), 0) as max_value FROM ${formattedTable}`
+          )
+
+          const maxValue = parseInt(maxValueResult.rows[0]?.max_value) || 0
+
+          if (lastValue) {
+            const safeValue = Math.max(parseInt(lastValue), maxValue)
+
+            await targetClient.query(`SELECT setval($1, $2, $3)`, [
+              formattedSequence,
+              safeValue,
+              isCalled
+            ])
+
+            this.log(`  ↻ Sequência ${formattedSequence} atualizada para ${safeValue}`)
+          }
+        } catch (seqError: any) {
+          this.log(
+            `  ⚠️  Erro ao sincronizar sequência "${sequenceName}" para tabela "${table}": ${seqError.message}`
+          )
+        }
+      }
+    } catch (error: any) {
+      this.log(`Erro ao sincronizar sequências de "${table}": ${error.message}`)
+    } finally {
+      await sourceClient.end()
+      await targetClient.end()
+    }
+  }
+
+  /**
    * Synchronizes a single table
    */
   private async syncTable(
@@ -1010,6 +1070,9 @@ export class DatabaseSync {
 
       try {
         await this.restoreTableData(table, dumpFile, metadata.primaryKey)
+
+        // Sincroniza as sequências após restaurar os dados
+        await this.syncTableSequences(table)
 
         await fs.unlink(dumpFile).catch(() => {})
 

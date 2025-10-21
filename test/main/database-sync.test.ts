@@ -18,7 +18,6 @@ describe('DatabaseSync', () => {
   }
 
   beforeAll(async () => {
-    // Iniciar containers PostgreSQL para origem e destino
     console.log('Iniciando containers PostgreSQL...')
 
     sourceContainer = await new GenericContainer('postgres:17.5-alpine')
@@ -1518,6 +1517,1000 @@ describe('DatabaseSync', () => {
         const syncLogs = logs.filter((log) => log.includes('SINCRONIZAÇÃO CONCLUÍDA'))
         expect(syncLogs).toHaveLength(3)
       })
+    })
+  })
+
+  describe('Sincronização de Sequências', () => {
+    beforeEach(async () => {
+      // Limpar logs antes de cada teste
+      logs.length = 0
+
+      // Limpar todas as tabelas de teste
+      await sourceClient.query('DROP TABLE IF EXISTS teste_sequencias CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS teste_sequencias CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS tabela_a CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS tabela_b CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS tabela_c CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS tabela_a CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS tabela_b CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS tabela_c CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS sem_serial CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS sem_serial CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS tabela_ok CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS tabela_ok CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS tabela_problema CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS grandes_valores CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS grandes_valores CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS teste_erro_seq CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS teste_erro_seq CASCADE')
+      await sourceClient.query('DROP SEQUENCE IF EXISTS custom_sequence CASCADE')
+      await targetClient.query('DROP SEQUENCE IF EXISTS custom_sequence CASCADE')
+      await sourceClient.query('DROP TABLE IF EXISTS com_seq_custom CASCADE')
+      await targetClient.query('DROP TABLE IF EXISTS com_seq_custom CASCADE')
+    })
+
+    it('deve sincronizar sequências após inserir dados', async () => {
+      // Criar tabela com SERIAL na origem
+      await sourceClient.query(`
+      CREATE TABLE teste_sequencias (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100) NOT NULL,
+        codigo SERIAL UNIQUE
+      )
+    `)
+
+      // Inserir dados com IDs específicos
+      await sourceClient.query(`
+      INSERT INTO teste_sequencias (id, nome, codigo) VALUES
+      (1, 'Item 1', 100),
+      (2, 'Item 2', 101),
+      (5, 'Item 5', 105),
+      (10, 'Item 10', 110)
+    `)
+
+      // Atualizar sequência manualmente para valor maior
+      await sourceClient.query(`SELECT setval('teste_sequencias_id_seq', 10, true)`)
+      await sourceClient.query(`SELECT setval('teste_sequencias_codigo_seq', 110, true)`)
+
+      // Criar mesma tabela no destino
+      await targetClient.query(`
+      CREATE TABLE teste_sequencias (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100) NOT NULL,
+        codigo SERIAL UNIQUE
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+      await dbSync.syncNow()
+
+      // Verificar se dados foram sincronizados
+      const result = await targetClient.query('SELECT COUNT(*) as count FROM teste_sequencias')
+      expect(parseInt(result.rows[0].count)).toBe(4)
+
+      // Verificar se sequências foram atualizadas
+      const seqIdResult = await targetClient.query(`SELECT last_value FROM teste_sequencias_id_seq`)
+      const seqCodigoResult = await targetClient.query(
+        `SELECT last_value FROM teste_sequencias_codigo_seq`
+      )
+
+      expect(parseInt(seqIdResult.rows[0].last_value)).toBe(10)
+      expect(parseInt(seqCodigoResult.rows[0].last_value)).toBe(110)
+
+      // Verificar logs de sincronização de sequências
+      const seqLogs = logs.filter((log) => log.includes('Sequência') && log.includes('atualizada'))
+      expect(seqLogs.length).toBeGreaterThanOrEqual(2)
+      expect(
+        seqLogs.some((log) => log.includes('teste_sequencias_id_seq') && log.includes('10'))
+      ).toBe(true)
+      expect(
+        seqLogs.some((log) => log.includes('teste_sequencias_codigo_seq') && log.includes('110'))
+      ).toBe(true)
+    })
+
+    it('deve permitir inserção após sincronização sem erro de duplicate key', async () => {
+      // Limpar logs explicitamente
+      logs.length = 0
+
+      await sourceClient.query(`
+      CREATE TABLE teste_sequencias (
+        id SERIAL PRIMARY KEY,
+        descricao VARCHAR(100)
+      )
+    `)
+
+      // Inserir dados com IDs específicos
+      await sourceClient.query(`
+      INSERT INTO teste_sequencias (id, descricao) VALUES
+      (1, 'Registro 1'),
+      (2, 'Registro 2'),
+      (100, 'Registro 100')
+    `)
+
+      // Garantir que a sequência está no valor correto
+      await sourceClient.query(`SELECT setval('teste_sequencias_id_seq', 100, true)`)
+
+      await targetClient.query(`
+      CREATE TABLE teste_sequencias (
+        id SERIAL PRIMARY KEY,
+        descricao VARCHAR(100)
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+
+      // Limpar logs novamente antes do sync
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // Verificar que a sequência foi sincronizada
+      const seqCheck = await targetClient.query(`SELECT last_value FROM teste_sequencias_id_seq`)
+      expect(parseInt(seqCheck.rows[0].last_value)).toBe(100)
+
+      // Tentar inserir novo registro no target SEM especificar ID
+      // Isso deve funcionar se a sequência foi sincronizada corretamente
+      const insertResult = await targetClient.query(`
+      INSERT INTO teste_sequencias (descricao) VALUES ('Novo Registro')
+      RETURNING id
+    `)
+
+      // O novo ID deve ser 101 (próximo após 100)
+      expect(insertResult.rows[0].id).toBe(101)
+
+      // Verificar que não há erros de duplicate key nos logs após o sync
+      const duplicateKeyErrors = logs.filter(
+        (log) =>
+          log.toLowerCase().includes('duplicate key') ||
+          log.toLowerCase().includes('violates unique constraint')
+      )
+      expect(duplicateKeyErrors.length).toBe(0)
+    })
+
+    it('deve sincronizar sequências de múltiplas tabelas corretamente', async () => {
+      // Limpar logs
+      logs.length = 0
+
+      // Criar múltiplas tabelas com SERIAL
+      await sourceClient.query(`
+      CREATE TABLE tabela_a (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100)
+      )
+    `)
+
+      await sourceClient.query(`
+      CREATE TABLE tabela_b (
+        id SERIAL PRIMARY KEY,
+        titulo VARCHAR(100)
+      )
+    `)
+
+      await sourceClient.query(`
+      CREATE TABLE tabela_c (
+        id SERIAL PRIMARY KEY,
+        descricao TEXT
+      )
+    `)
+
+      // Inserir dados e avançar sequências
+      await sourceClient.query(`INSERT INTO tabela_a (id, nome) VALUES (50, 'Nome 50')`)
+      await sourceClient.query(`SELECT setval('tabela_a_id_seq', 50, true)`)
+
+      await sourceClient.query(`INSERT INTO tabela_b (id, titulo) VALUES (200, 'Titulo 200')`)
+      await sourceClient.query(`SELECT setval('tabela_b_id_seq', 200, true)`)
+
+      await sourceClient.query(`INSERT INTO tabela_c (id, descricao) VALUES (1000, 'Desc 1000')`)
+      await sourceClient.query(`SELECT setval('tabela_c_id_seq', 1000, true)`)
+
+      // Criar no target
+      await targetClient.query(`
+      CREATE TABLE tabela_a (
+        id SERIAL PRIMARY KEY,
+        nome VARCHAR(100)
+      )
+    `)
+
+      await targetClient.query(`
+      CREATE TABLE tabela_b (
+        id SERIAL PRIMARY KEY,
+        titulo VARCHAR(100)
+      )
+    `)
+
+      await targetClient.query(`
+      CREATE TABLE tabela_c (
+        id SERIAL PRIMARY KEY,
+        descricao TEXT
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+
+      // Limpar logs antes do sync
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // Verificar sequências de cada tabela
+      const seqA = await targetClient.query(`SELECT last_value FROM tabela_a_id_seq`)
+      const seqB = await targetClient.query(`SELECT last_value FROM tabela_b_id_seq`)
+      const seqC = await targetClient.query(`SELECT last_value FROM tabela_c_id_seq`)
+
+      expect(parseInt(seqA.rows[0].last_value)).toBe(50)
+      expect(parseInt(seqB.rows[0].last_value)).toBe(200)
+      expect(parseInt(seqC.rows[0].last_value)).toBe(1000)
+
+      // Verificar logs - filtrar apenas as sequências das 3 tabelas específicas
+      const seqLogs = logs.filter(
+        (log) =>
+          log.includes('Sequência') &&
+          log.includes('atualizada') &&
+          (log.includes('tabela_a_id_seq') ||
+            log.includes('tabela_b_id_seq') ||
+            log.includes('tabela_c_id_seq'))
+      )
+      expect(seqLogs.length).toBe(3)
+    })
+
+    it('deve lidar com tabelas sem sequências (sem colunas SERIAL)', async () => {
+      await sourceClient.query(`
+      CREATE TABLE sem_serial (
+        id INTEGER PRIMARY KEY,
+        nome VARCHAR(100)
+      )
+    `)
+
+      await sourceClient.query(`
+      INSERT INTO sem_serial (id, nome) VALUES (1, 'Manual 1'), (2, 'Manual 2')
+    `)
+
+      await targetClient.query(`
+      CREATE TABLE sem_serial (
+        id INTEGER PRIMARY KEY,
+        nome VARCHAR(100)
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+
+      // Limpar logs antes do sync
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // Verificar que dados foram sincronizados
+      const result = await targetClient.query('SELECT COUNT(*) as count FROM sem_serial')
+      expect(parseInt(result.rows[0].count)).toBe(2)
+
+      // Não deve haver logs de sincronização de sequências para esta tabela
+      const seqLogs = logs.filter(
+        (log) =>
+          log.includes('sem_serial') && log.includes('Sequência') && log.includes('atualizada')
+      )
+      expect(seqLogs.length).toBe(0)
+    })
+
+    it('deve sincronizar sequências mesmo quando há erro em outras tabelas', async () => {
+      // Criar tabela que vai sincronizar com sucesso
+      await sourceClient.query(`
+      CREATE TABLE tabela_ok (
+        id SERIAL PRIMARY KEY,
+        valor VARCHAR(100)
+      )
+    `)
+
+      await sourceClient.query(`
+      INSERT INTO tabela_ok (id, valor) VALUES (999, 'Valor 999')
+    `)
+
+      await sourceClient.query(`SELECT setval('tabela_ok_id_seq', 999, true)`)
+
+      await targetClient.query(`
+      CREATE TABLE tabela_ok (
+        id SERIAL PRIMARY KEY,
+        valor VARCHAR(100)
+      )
+    `)
+
+      // Criar tabela problemática (só existe no source)
+      await sourceClient.query(`
+      CREATE TABLE tabela_problema (
+        id SERIAL PRIMARY KEY,
+        dado TEXT
+      )
+    `)
+
+      await sourceClient.query(`INSERT INTO tabela_problema (dado) VALUES ('teste')`)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+
+      // Limpar logs antes do sync
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // Verificar que a sequência da tabela_ok foi sincronizada
+      const seqResult = await targetClient.query(`SELECT last_value FROM tabela_ok_id_seq`)
+      expect(parseInt(seqResult.rows[0].last_value)).toBe(999)
+
+      // Verificar logs
+      const seqLog = logs.find(
+        (log) =>
+          log.includes('tabela_ok_id_seq') && log.includes('atualizada') && log.includes('999')
+      )
+      expect(seqLog).toBeDefined()
+    })
+
+    it('deve sincronizar sequências com valores muito grandes', async () => {
+      await sourceClient.query(`
+      CREATE TABLE grandes_valores (
+        id BIGSERIAL PRIMARY KEY,
+        info TEXT
+      )
+    `)
+
+      // Usar um valor grande
+      const bigValue = 9999999999
+      await sourceClient.query(`
+      INSERT INTO grandes_valores (id, info) VALUES (${bigValue}, 'Big Value')
+    `)
+
+      await sourceClient.query(`SELECT setval('grandes_valores_id_seq', ${bigValue}, true)`)
+
+      await targetClient.query(`
+      CREATE TABLE grandes_valores (
+        id BIGSERIAL PRIMARY KEY,
+        info TEXT
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+
+      // Limpar logs antes do sync
+      logs.length = 0
+      await dbSync.syncNow()
+
+      const seqResult = await targetClient.query(`SELECT last_value FROM grandes_valores_id_seq`)
+      expect(parseInt(seqResult.rows[0].last_value)).toBe(bigValue)
+
+      // Verificar log
+      const seqLog = logs.find(
+        (log) => log.includes('grandes_valores_id_seq') && log.includes('atualizada')
+      )
+      expect(seqLog).toBeDefined()
+    })
+
+    it('deve lidar graciosamente com erro ao sincronizar sequência', async () => {
+      await sourceClient.query(`
+      CREATE TABLE teste_erro_seq (
+        id SERIAL PRIMARY KEY,
+        dado VARCHAR(50)
+      )
+    `)
+
+      await sourceClient.query(`
+      INSERT INTO teste_erro_seq (id, dado) VALUES (100, 'Teste')
+    `)
+
+      await sourceClient.query(`SELECT setval('teste_erro_seq_id_seq', 100, true)`)
+
+      await targetClient.query(`
+      CREATE TABLE teste_erro_seq (
+        id SERIAL PRIMARY KEY,
+        dado VARCHAR(50)
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+
+      // Limpar logs antes do sync
+      logs.length = 0
+
+      // Mesmo se houver erro na sequência, a sincronização deve continuar
+      await expect(dbSync.syncNow()).resolves.not.toThrow()
+
+      // Verificar que dados foram sincronizados
+      const result = await targetClient.query('SELECT COUNT(*) as count FROM teste_erro_seq')
+      expect(parseInt(result.rows[0].count)).toBe(1)
+
+      // Verificar que a sequência foi sincronizada
+      const seqResult = await targetClient.query(`SELECT last_value FROM teste_erro_seq_id_seq`)
+      expect(parseInt(seqResult.rows[0].last_value)).toBe(100)
+    })
+
+    it('deve sincronizar sequências com nomes customizados', async () => {
+      logs.length = 0
+
+      await sourceClient.query(`
+    CREATE SEQUENCE custom_sequence START 5000
+  `)
+
+      await sourceClient.query(`
+    CREATE TABLE com_seq_custom (
+      id INTEGER PRIMARY KEY DEFAULT nextval('custom_sequence'),
+      titulo VARCHAR(100)
+    )
+  `)
+
+      await sourceClient.query(`
+    INSERT INTO com_seq_custom (titulo) VALUES ('Titulo 1'), ('Titulo 2')
+  `)
+
+      await sourceClient.query(`SELECT setval('custom_sequence', 5002, true)`)
+
+      const sourceSeqCheck = await sourceClient.query(`SELECT last_value FROM custom_sequence`)
+      console.log('🔍 Sequência no SOURCE:', sourceSeqCheck.rows[0].last_value)
+
+      await targetClient.query(`
+    CREATE SEQUENCE custom_sequence START 5000
+  `)
+
+      await targetClient.query(`
+    CREATE TABLE com_seq_custom (
+      id INTEGER PRIMARY KEY DEFAULT nextval('custom_sequence'),
+      titulo VARCHAR(100)
+    )
+  `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+
+      logs.length = 0
+      await dbSync.syncNow()
+
+      const allSeqLogs = logs.filter(
+        (log) => log.toLowerCase().includes('sequência') || log.toLowerCase().includes('sequence')
+      )
+      console.log('📋 Logs de sequências:', allSeqLogs)
+
+      const result = await targetClient.query('SELECT COUNT(*) as count FROM com_seq_custom')
+      expect(parseInt(result.rows[0].count)).toBe(2)
+
+      const seqResult = await targetClient.query(`SELECT last_value FROM custom_sequence`)
+      console.log('🔍 Sequência no TARGET:', seqResult.rows[0].last_value)
+
+      const columnDefaultCheck = await sourceClient.query(`
+    SELECT column_name, column_default
+    FROM information_schema.columns
+    WHERE table_name = 'com_seq_custom'
+  `)
+      console.log('🔍 Column defaults:', columnDefaultCheck.rows)
+
+      expect(parseInt(seqResult.rows[0].last_value)).toBe(5002)
+    })
+  })
+
+  describe('Sincronização de Sequências - Cenários Complexos', () => {
+    beforeEach(async () => {
+      // Limpar logs antes de cada teste
+      logs.length = 0
+
+      // Limpar todas as tabelas de teste
+      await cleanupTestTables()
+    })
+
+    async function cleanupTestTables() {
+      const tables = [
+        'teste_sequencias',
+        'tabela_a',
+        'tabela_b',
+        'tabela_c',
+        'sem_serial',
+        'tabela_ok',
+        'tabela_problema',
+        'grandes_valores',
+        'teste_erro_seq',
+        'com_seq_custom',
+        'TabelaComCamelCase',
+        'OutraTabelaComplexa',
+        'tabela_multi_serial'
+      ]
+
+      for (const table of tables) {
+        await sourceClient.query(`DROP TABLE IF EXISTS "${table}" CASCADE`)
+        await targetClient.query(`DROP TABLE IF EXISTS "${table}" CASCADE`)
+      }
+
+      const sequences = [
+        'custom_sequence',
+        'seq_camel_case',
+        'TabelaComCamelCase_id_seq',
+        'OutraTabelaComplexa_codigo_seq'
+      ]
+
+      for (const seq of sequences) {
+        await sourceClient.query(`DROP SEQUENCE IF EXISTS "${seq}" CASCADE`)
+        await targetClient.query(`DROP SEQUENCE IF EXISTS "${seq}" CASCADE`)
+      }
+    }
+
+    it('deve sincronizar sequências de tabelas com nomes em camelCase', async () => {
+      // 🔥 TESTE CRÍTICO: Tabela com nome em camelCase
+      await sourceClient.query(`
+      CREATE TABLE "TabelaComCamelCase" (
+        "id" SERIAL PRIMARY KEY,
+        "nomeComposto" VARCHAR(100),
+        "codigoSequencial" SERIAL
+      )
+    `)
+
+      // Inserir dados avançando as sequências
+      await sourceClient.query(`
+      INSERT INTO "TabelaComCamelCase" ("id", "nomeComposto", "codigoSequencial") 
+      VALUES 
+        (10, 'Teste 1', 100),
+        (20, 'Teste 2', 200),
+        (50, 'Teste 3', 500)
+    `)
+
+      // Avançar sequências manualmente
+      await sourceClient.query(`SELECT setval('"TabelaComCamelCase_id_seq"', 50, true)`)
+      await sourceClient.query(
+        `SELECT setval('"TabelaComCamelCase_codigoSequencial_seq"', 500, true)`
+      )
+
+      // Criar mesma estrutura no target
+      await targetClient.query(`
+      CREATE TABLE "TabelaComCamelCase" (
+        "id" SERIAL PRIMARY KEY,
+        "nomeComposto" VARCHAR(100),
+        "codigoSequencial" SERIAL
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+
+      // Limpar logs antes do sync
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // 🔍 VERIFICAÇÕES DETALHADAS
+
+      // 1. Verificar dados sincronizados
+      const dataResult = await targetClient.query(
+        'SELECT COUNT(*) as count FROM "TabelaComCamelCase"'
+      )
+      expect(parseInt(dataResult.rows[0].count)).toBe(3)
+
+      // 2. Verificar sequência principal (id)
+      const seqIdResult = await targetClient.query(
+        `SELECT last_value, is_called FROM "TabelaComCamelCase_id_seq"`
+      )
+      expect(parseInt(seqIdResult.rows[0].last_value)).toBe(50)
+      expect(seqIdResult.rows[0].is_called).toBe(true)
+
+      // 3. Verificar sequência secundária (codigoSequencial)
+      const seqCodigoResult = await targetClient.query(
+        `SELECT last_value, is_called FROM "TabelaComCamelCase_codigoSequencial_seq"`
+      )
+      expect(parseInt(seqCodigoResult.rows[0].last_value)).toBe(500)
+      expect(seqCodigoResult.rows[0].is_called).toBe(true)
+
+      // 4. Verificar que podemos inserir novos registros SEM conflitos
+      const newInsert = await targetClient.query(`
+      INSERT INTO "TabelaComCamelCase" ("nomeComposto") 
+      VALUES ('Novo após sync') 
+      RETURNING "id", "codigoSequencial"
+    `)
+
+      // IDs devem continuar a partir dos valores sincronizados
+      expect(newInsert.rows[0].id).toBe(51)
+      expect(newInsert.rows[0].codigoSequencial).toBe(501)
+
+      // 5. Verificar logs específicos de sequências camelCase
+      const camelCaseLogs = logs.filter(
+        (log) =>
+          log.includes('TabelaComCamelCase') &&
+          (log.includes('Sequência') || log.includes('sequência'))
+      )
+      expect(camelCaseLogs.length).toBeGreaterThanOrEqual(2)
+    })
+
+    it('deve sincronizar múltiplas tabelas com camelCase e sequências complexas', async () => {
+      // Tabela 1: CamelCase simples
+      await sourceClient.query(`
+      CREATE TABLE "OutraTabelaComplexa" (
+        "idPrincipal" SERIAL PRIMARY KEY,
+        "descricaoLonga" TEXT,
+        "numeroUnico" SERIAL UNIQUE
+      )
+    `)
+
+      // Tabela 2: Múltiplas sequências
+      await sourceClient.query(`
+      CREATE TABLE "tabela_multi_serial" (
+        "id" SERIAL PRIMARY KEY,
+        "codigo" SERIAL,
+        "versao" SERIAL,
+        "nome" VARCHAR(100)
+      )
+    `)
+
+      // Inserir dados avançando sequências
+      await sourceClient.query(`
+      INSERT INTO "OutraTabelaComplexa" ("idPrincipal", "descricaoLonga", "numeroUnico") 
+      VALUES 
+        (100, 'Desc 1', 1000),
+        (200, 'Desc 2', 2000)
+    `)
+
+      await sourceClient.query(`
+      INSERT INTO "tabela_multi_serial" ("id", "codigo", "versao", "nome")
+      VALUES 
+        (5, 10, 1, 'Teste 1'),
+        (15, 25, 2, 'Teste 2')
+    `)
+
+      // Avançar todas as sequências
+      await sourceClient.query(`SELECT setval('"OutraTabelaComplexa_idPrincipal_seq"', 200, true)`)
+      await sourceClient.query(`SELECT setval('"OutraTabelaComplexa_numeroUnico_seq"', 2000, true)`)
+      await sourceClient.query(`SELECT setval('"tabela_multi_serial_id_seq"', 15, true)`)
+      await sourceClient.query(`SELECT setval('"tabela_multi_serial_codigo_seq"', 25, true)`)
+      await sourceClient.query(`SELECT setval('"tabela_multi_serial_versao_seq"', 2, true)`)
+
+      // Criar no target
+      await targetClient.query(`
+      CREATE TABLE "OutraTabelaComplexa" (
+        "idPrincipal" SERIAL PRIMARY KEY,
+        "descricaoLonga" TEXT,
+        "numeroUnico" SERIAL UNIQUE
+      )
+    `)
+
+      await targetClient.query(`
+      CREATE TABLE "tabela_multi_serial" (
+        "id" SERIAL PRIMARY KEY,
+        "codigo" SERIAL,
+        "versao" SERIAL,
+        "nome" VARCHAR(100)
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // 🔍 VERIFICAÇÕES DETALHADAS PARA CADA SEQUÊNCIA
+
+      // Sequências da tabela camelCase
+      const seqIdPrincipal = await targetClient.query(
+        `SELECT last_value FROM "OutraTabelaComplexa_idPrincipal_seq"`
+      )
+      expect(parseInt(seqIdPrincipal.rows[0].last_value)).toBe(200)
+
+      const seqNumeroUnico = await targetClient.query(
+        `SELECT last_value FROM "OutraTabelaComplexa_numeroUnico_seq"`
+      )
+      expect(parseInt(seqNumeroUnico.rows[0].last_value)).toBe(2000)
+
+      // Sequências da tabela multi-serial
+      const seqId = await targetClient.query(`SELECT last_value FROM "tabela_multi_serial_id_seq"`)
+      expect(parseInt(seqId.rows[0].last_value)).toBe(15)
+
+      const seqCodigo = await targetClient.query(
+        `SELECT last_value FROM "tabela_multi_serial_codigo_seq"`
+      )
+      expect(parseInt(seqCodigo.rows[0].last_value)).toBe(25)
+
+      const seqVersao = await targetClient.query(
+        `SELECT last_value FROM "tabela_multi_serial_versao_seq"`
+      )
+      expect(parseInt(seqVersao.rows[0].last_value)).toBe(2)
+
+      // Testar inserções pós-sincronização
+      const newInsert1 = await targetClient.query(`
+      INSERT INTO "OutraTabelaComplexa" ("descricaoLonga") 
+      VALUES ('Novo registro') 
+      RETURNING "idPrincipal", "numeroUnico"
+    `)
+      expect(newInsert1.rows[0].idPrincipal).toBe(201)
+      expect(newInsert1.rows[0].numeroUnico).toBe(2001)
+
+      const newInsert2 = await targetClient.query(`
+      INSERT INTO "tabela_multi_serial" ("nome") 
+      VALUES ('Novo multi') 
+      RETURNING "id", "codigo", "versao"
+    `)
+      expect(newInsert2.rows[0].id).toBe(16)
+      expect(newInsert2.rows[0].codigo).toBe(26)
+      expect(newInsert2.rows[0].versao).toBe(3)
+    })
+
+    it('deve verificar fidelidade total das sequências ao banco original', async () => {
+      // Criar estrutura complexa
+      await sourceClient.query(`
+      CREATE TABLE "TabelaComCamelCase" (
+        "id" SERIAL PRIMARY KEY,
+        "codigo" SERIAL,
+        "descricao" VARCHAR(200),
+        "ativo" BOOLEAN DEFAULT true
+      )
+    `)
+
+      // Inserir dados criando "buracos" intencionais na sequência
+      await sourceClient.query(`
+      INSERT INTO "TabelaComCamelCase" ("id", "codigo", "descricao") VALUES
+        (1, 100, 'Item 1'),
+        (5, 500, 'Item 5'),  -- Pulou IDs 2,3,4
+        (10, 1000, 'Item 10') -- Pulou IDs 6,7,8,9
+    `)
+
+      // Avançar sequências além do máximo atual (simulando uso real)
+      await sourceClient.query(`SELECT setval('"TabelaComCamelCase_id_seq"', 20, true)`)
+      await sourceClient.query(`SELECT setval('"TabelaComCamelCase_codigo_seq"', 1500, true)`)
+
+      // Obter valores EXATOS das sequências no source
+      const sourceIdSeq = await sourceClient.query(
+        `SELECT last_value, is_called FROM "TabelaComCamelCase_id_seq"`
+      )
+      const sourceCodigoSeq = await sourceClient.query(
+        `SELECT last_value, is_called FROM "TabelaComCamelCase_codigo_seq"`
+      )
+
+      // Criar no target
+      await targetClient.query(`
+      CREATE TABLE "TabelaComCamelCase" (
+        "id" SERIAL PRIMARY KEY,
+        "codigo" SERIAL,
+        "descricao" VARCHAR(200),
+        "ativo" BOOLEAN DEFAULT true
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // 🔍 VERIFICAÇÃO DE FIDELIDADE TOTAL
+
+      // 1. Verificar que os dados foram sincronizados corretamente
+      const targetData = await targetClient.query(
+        'SELECT * FROM "TabelaComCamelCase" ORDER BY "id"'
+      )
+      expect(targetData.rows).toHaveLength(3)
+      expect(targetData.rows[0].id).toBe(1)
+      expect(targetData.rows[1].id).toBe(5)
+      expect(targetData.rows[2].id).toBe(10)
+
+      // 2. Verificar FIDELIDADE das sequências (valores EXATOS do source)
+      const targetIdSeq = await targetClient.query(
+        `SELECT last_value, is_called FROM "TabelaComCamelCase_id_seq"`
+      )
+      const targetCodigoSeq = await targetClient.query(
+        `SELECT last_value, is_called FROM "TabelaComCamelCase_codigo_seq"`
+      )
+
+      // Comparação exata com o source
+      expect(parseInt(targetIdSeq.rows[0].last_value)).toBe(
+        parseInt(sourceIdSeq.rows[0].last_value)
+      )
+      expect(targetIdSeq.rows[0].is_called).toBe(sourceIdSeq.rows[0].is_called)
+
+      expect(parseInt(targetCodigoSeq.rows[0].last_value)).toBe(
+        parseInt(sourceCodigoSeq.rows[0].last_value)
+      )
+      expect(targetCodigoSeq.rows[0].is_called).toBe(sourceCodigoSeq.rows[0].is_called)
+
+      // 3. Verificar comportamento pós-sincronização
+      const newInsert = await targetClient.query(`
+      INSERT INTO "TabelaComCamelCase" ("descricao") 
+      VALUES ('Novo após sync fiel') 
+      RETURNING "id", "codigo"
+    `)
+
+      // Deve continuar exatamente de onde parou no source
+      expect(newInsert.rows[0].id).toBe(21) // 20 + 1
+      expect(newInsert.rows[0].codigo).toBe(1501) // 1500 + 1
+
+      // 4. Verificar logs de fidelidade
+      const fidelityLogs = logs.filter(
+        (log) =>
+          log.includes('TabelaComCamelCase') &&
+          log.includes('atualizada') &&
+          (log.includes('21') || log.includes('1501'))
+      )
+      expect(fidelityLogs.length).toBeGreaterThan(0)
+    })
+
+    it('deve lidar com sequências customizadas em tabelas camelCase', async () => {
+      // Criar sequência customizada com nome complexo
+      await sourceClient.query(`CREATE SEQUENCE "seq_camel_case" START 7777`)
+
+      await sourceClient.query(`
+      CREATE TABLE "TabelaComCamelCase" (
+        "idCustom" INTEGER PRIMARY KEY DEFAULT nextval('"seq_camel_case"'),
+        "nome" VARCHAR(100),
+        "codigoAuto" SERIAL
+      )
+    `)
+
+      // Inserir dados usando ambas as sequências
+      await sourceClient.query(`
+      INSERT INTO "TabelaComCamelCase" ("nome", "codigoAuto") VALUES 
+        ('Item 1', 100),
+        ('Item 2', 200)
+    `)
+
+      // Avançar ambas as sequências
+      await sourceClient.query(`SELECT setval('"seq_camel_case"', 8888, true)`)
+      await sourceClient.query(`SELECT setval('"TabelaComCamelCase_codigoAuto_seq"', 300, true)`)
+
+      // Obter valores exatos do source
+      const sourceCustomSeq = await sourceClient.query(`SELECT last_value FROM "seq_camel_case"`)
+      const sourceAutoSeq = await sourceClient.query(
+        `SELECT last_value FROM "TabelaComCamelCase_codigoAuto_seq"`
+      )
+
+      // Criar no target
+      await targetClient.query(`CREATE SEQUENCE "seq_camel_case" START 7777`)
+      await targetClient.query(`
+      CREATE TABLE "TabelaComCamelCase" (
+        "idCustom" INTEGER PRIMARY KEY DEFAULT nextval('"seq_camel_case"'),
+        "nome" VARCHAR(100),
+        "codigoAuto" SERIAL
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // 🔍 VERIFICAÇÕES
+
+      // 1. Verificar dados
+      const dataResult = await targetClient.query(
+        'SELECT COUNT(*) as count FROM "TabelaComCamelCase"'
+      )
+      expect(parseInt(dataResult.rows[0].count)).toBe(2)
+
+      // 2. Verificar fidelidade das sequências customizadas
+      const targetCustomSeq = await targetClient.query(`SELECT last_value FROM "seq_camel_case"`)
+      const targetAutoSeq = await targetClient.query(
+        `SELECT last_value FROM "TabelaComCamelCase_codigoAuto_seq"`
+      )
+
+      expect(parseInt(targetCustomSeq.rows[0].last_value)).toBe(
+        parseInt(sourceCustomSeq.rows[0].last_value)
+      )
+      expect(parseInt(targetAutoSeq.rows[0].last_value)).toBe(
+        parseInt(sourceAutoSeq.rows[0].last_value)
+      )
+
+      // 3. Testar inserção pós-sync
+      const newInsert = await targetClient.query(`
+      INSERT INTO "TabelaComCamelCase" ("nome") 
+      VALUES ('Novo com sequências custom') 
+      RETURNING "idCustom", "codigoAuto"
+    `)
+
+      expect(newInsert.rows[0].idCustom).toBe(8889) // 8888 + 1
+      expect(newInsert.rows[0].codigoAuto).toBe(301) // 300 + 1
+    })
+
+    it('deve detectar e logar problemas específicos de sequências camelCase', async () => {
+      // Criar tabela que vai falhar na sincronização de sequência
+      await sourceClient.query(`
+      CREATE TABLE "TabelaProblemaSequencia" (
+        "id" SERIAL PRIMARY KEY,
+        "dado" VARCHAR(100)
+      )
+    `)
+
+      await sourceClient.query(`INSERT INTO "TabelaProblemaSequencia" ("dado") VALUES ('Teste')`)
+
+      // Criar no target MAS sem a sequência (simulando problema)
+      await targetClient.query(`
+      CREATE TABLE "TabelaProblemaSequencia" (
+        "id" INTEGER PRIMARY KEY,  -- SEM SERIAL, sem sequência
+        "dado" VARCHAR(100)
+      )
+    `)
+
+      const config: SyncConfig = {
+        sourceUrl,
+        targetUrl,
+        intervalMinutes: 1,
+        excludeTables: []
+      }
+
+      const dbSync = new DatabaseSync(config, logCallback)
+      logs.length = 0
+      await dbSync.syncNow()
+
+      // Verificar que a sincronização continua mesmo com erro de sequência
+      const dataResult = await targetClient.query(
+        'SELECT COUNT(*) as count FROM "TabelaProblemaSequencia"'
+      )
+      expect(parseInt(dataResult.rows[0].count)).toBe(1)
+
+      // Verificar logs de erro específicos
+      const errorLogs = logs.filter(
+        (log) =>
+          log.includes('TabelaProblemaSequencia') &&
+          log.includes('sequência') &&
+          log.toLowerCase().includes('erro')
+      )
+      expect(errorLogs.length).toBeGreaterThan(0)
     })
   })
 })

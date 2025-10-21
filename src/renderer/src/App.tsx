@@ -7,7 +7,7 @@ function App(): React.JSX.Element {
   const [isLogsWindow, setIsLogsWindow] = useState(false)
 
   useEffect(() => {
-    window.electron.ipcRenderer.on('window-type', (event, type: string) => {
+    window.electron.ipcRenderer.on('window-type', (_event, type: string) => {
       setIsLogsWindow(type === 'logs')
     })
     return () => {
