@@ -4,7 +4,7 @@ import { promises as fs } from 'fs'
 import { Client } from 'pg'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { DatabaseSync } from './database-sync'
+import { DatabaseSync, runPrismaMigrations } from './database-sync'
 import { GenericHandlers } from './generic'
 
 let dbSync: DatabaseSync | null = null
@@ -176,7 +176,7 @@ function registerHandlers(): void {
       }
       isSyncRunning = true
 
-      await DatabaseSync.runPrismaMigrations(backendDir, targetUrl, (log) => {
+      await runPrismaMigrations(backendDir, targetUrl, (log) => {
         logsBuffer.push(log)
 
         if (logsWindow && !logsWindow.isDestroyed()) {
