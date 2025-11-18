@@ -90,7 +90,7 @@ export async function syncTableSequences(
           const nextId = isCalled ? targetValue + 1 : targetValue
 
           log(
-            `  ↻ Sequência ${sequenceNameWithSchema} atualizada para ${targetValue} (Próximo ID: ${nextId})`
+            `↻ Sequência ${sequenceNameWithSchema} atualizada para ${targetValue} (Próximo ID: ${nextId})`
           )
         }
       } catch (seqError: any) {
