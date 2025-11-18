@@ -27,8 +27,8 @@ class BinaryManager {
         this.binaryCache.set(cacheKey, systemPath)
         return systemPath
       }
-    } catch {
-      console.log(`${binaryName} não encontrado no PATH`)
+    } catch (error) {
+      console.log(`${binaryName} não encontrado no PATH:`, error)
     }
 
     if (binaryName === 'pg_dump' || binaryName === 'pg_restore') {
@@ -63,14 +63,80 @@ class BinaryManager {
     const ext = process.platform === 'win32' ? '.exe' : ''
 
     try {
-      const { stdout } = await execAsync(`${command} ${binaryName}${ext}`)
-      const foundPath = stdout.trim().split('\n')[0]
+      const { stdout } = await execAsync(`${command} ${binaryName}${ext}`, {
+        env: this.getEnhancedEnv()
+      } as any)
 
-      await fs.access(foundPath, fs.constants.X_OK)
-      return foundPath
+      const foundPath = stdout.toString().trim().split('\n')[0].trim()
+
+      if (!foundPath) {
+        return null
+      }
+
+      try {
+        await fs.access(foundPath, fs.constants.X_OK)
+        return foundPath
+      } catch {
+        if (process.platform === 'win32') {
+          await fs.access(foundPath, fs.constants.F_OK)
+          return foundPath
+        }
+        return null
+      }
     } catch {
       return null
     }
+  }
+
+  /**
+   * Retorna variáveis de ambiente melhoradas, incluindo locais comuns
+   */
+  private getEnhancedEnv(): NodeJS.ProcessEnv {
+    const env = { ...process.env }
+    const platform = process.platform
+    const home = process.env.HOME || process.env.USERPROFILE || ''
+
+    const additionalPaths: string[] = []
+
+    if (platform === 'win32') {
+      additionalPaths.push(
+        'C:\\Program Files\\nodejs',
+        'C:\\Program Files (x86)\\nodejs',
+        path.join(process.env.LOCALAPPDATA || '', 'Programs', 'nodejs'),
+        path.join(process.env.APPDATA || '', 'npm')
+      )
+    } else if (platform === 'darwin') {
+      additionalPaths.push(
+        '/usr/local/bin',
+        '/opt/homebrew/bin',
+        '/usr/bin',
+        path.join(home, '.nvm/current/bin'),
+        path.join(home, '.volta/bin'),
+        path.join(home, '.fnm/current/bin'),
+        path.join(home, '.asdf/shims')
+      )
+    } else {
+      additionalPaths.push(
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+        path.join(home, '.nvm/current/bin'),
+        path.join(home, '.volta/bin'),
+        path.join(home, '.fnm/current/bin'),
+        path.join(home, '.asdf/shims')
+      )
+    }
+
+    const currentPath = env.PATH || ''
+    const separator = platform === 'win32' ? ';' : ':'
+
+    const newPaths = additionalPaths.filter((p) => !currentPath.includes(p))
+
+    if (newPaths.length > 0) {
+      env.PATH = [currentPath, ...newPaths].filter(Boolean).join(separator)
+    }
+
+    return env
   }
 
   private async findPostgresBinary(binaryName: string, version?: string): Promise<string | null> {
@@ -140,44 +206,125 @@ class BinaryManager {
 
   private async findNodeBinary(): Promise<string | null> {
     const platform = process.platform
+    const home = process.env.HOME || process.env.USERPROFILE || ''
     const possiblePaths: string[] = []
+
+    if (process.execPath) {
+      try {
+        await fs.access(process.execPath, fs.constants.F_OK)
+        possiblePaths.unshift(process.execPath)
+      } catch {
+        //
+      }
+    }
 
     if (platform === 'win32') {
       const programFiles = process.env['ProgramFiles'] || 'C:\\Program Files'
       const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
+      const localAppData = process.env['LOCALAPPDATA'] || path.join(home, 'AppData', 'Local')
+      const appData = process.env['APPDATA'] || path.join(home, 'AppData', 'Roaming')
 
       possiblePaths.push(
         path.join(programFiles, 'nodejs', 'node.exe'),
         path.join(programFilesX86, 'nodejs', 'node.exe'),
         'C:\\Program Files\\nodejs\\node.exe',
-        path.join(process.env['LOCALAPPDATA'] || '', 'Programs', 'nodejs', 'node.exe')
+        path.join(localAppData, 'Programs', 'nodejs', 'node.exe'),
+
+        path.join(appData, 'nvm', 'current', 'node.exe'),
+        path.join(localAppData, 'fnm_multishells', '*', 'node.exe'),
+        path.join(localAppData, 'Volta', 'tools', 'image', 'node', '*', 'bin', 'node.exe')
       )
     } else if (platform === 'darwin') {
       possiblePaths.push(
         '/usr/local/bin/node',
         '/opt/homebrew/bin/node',
         '/usr/bin/node',
-        path.join(process.env['HOME'] || '', '.nvm', 'current', 'bin', 'node')
+
+        path.join(home, '.nvm', 'current', 'bin', 'node'),
+        path.join(home, '.volta', 'bin', 'node'),
+        path.join(home, '.fnm', 'current', 'bin', 'node'),
+        path.join(home, '.asdf', 'shims', 'node')
       )
+
+      try {
+        const nvmDir = path.join(home, '.nvm', 'versions', 'node')
+        const versions = await fs.readdir(nvmDir)
+        if (versions.length > 0) {
+          const latestVersion = versions.sort().reverse()[0]
+          possiblePaths.push(path.join(nvmDir, latestVersion, 'bin', 'node'))
+        }
+      } catch {
+        //
+      }
     } else {
       possiblePaths.push(
         '/usr/bin/node',
         '/usr/local/bin/node',
         '/opt/node/bin/node',
-        path.join(process.env['HOME'] || '', '.nvm', 'current', 'bin', 'node')
+
+        path.join(home, '.nvm', 'current', 'bin', 'node'),
+        path.join(home, '.volta', 'bin', 'node'),
+        path.join(home, '.fnm', 'current', 'bin', 'node'),
+        path.join(home, '.asdf', 'shims', 'node')
       )
+
+      try {
+        const nvmDir = path.join(home, '.nvm', 'versions', 'node')
+        const versions = await fs.readdir(nvmDir)
+        if (versions.length > 0) {
+          const latestVersion = versions.sort().reverse()[0]
+          possiblePaths.push(path.join(nvmDir, latestVersion, 'bin', 'node'))
+        }
+      } catch {
+        //
+      }
     }
 
     for (const possiblePath of possiblePaths) {
-      try {
-        await fs.access(possiblePath, fs.constants.X_OK)
-        return possiblePath
-      } catch {
-        continue
+      if (possiblePath.includes('*')) {
+        try {
+          const dir = path.dirname(possiblePath)
+          const pattern = path.basename(possiblePath)
+          const entries = await fs.readdir(dir)
+
+          for (const entry of entries) {
+            const fullPath = path.join(dir, entry, pattern.replace('*', ''))
+            try {
+              await fs.access(fullPath, fs.constants.F_OK)
+
+              if (platform === 'win32' || (await this.isExecutable(fullPath))) {
+                return fullPath
+              }
+            } catch {
+              continue
+            }
+          }
+        } catch {
+          continue
+        }
+      } else {
+        try {
+          await fs.access(possiblePath, fs.constants.F_OK)
+
+          if (platform === 'win32' || (await this.isExecutable(possiblePath))) {
+            return possiblePath
+          }
+        } catch {
+          continue
+        }
       }
     }
 
     return null
+  }
+
+  private async isExecutable(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath, fs.constants.X_OK)
+      return true
+    } catch {
+      return false
+    }
   }
 
   private async getBundledPrismaPath(): Promise<string> {
@@ -199,11 +346,8 @@ class BinaryManager {
 
     await fs.access(prismaCliPath)
 
-    if (process.platform !== 'win32') {
-      return `node "${prismaCliPath}"`
-    }
-
-    return prismaCliPath
+    const nodePath = await this.getBinaryPath('node')
+    return `"${nodePath}" "${prismaCliPath}"`
   }
 
   async verifyPostgresTools(): Promise<{ available: boolean; message: string; paths?: any }> {
@@ -247,18 +391,27 @@ class BinaryManager {
     }
   }
 
-  async verifyNode(): Promise<{ available: boolean; message: string; path?: string }> {
+  async verifyNode(): Promise<{
+    available: boolean
+    message: string
+    path?: string
+    version?: string
+  }> {
     try {
       const nodePath = await this.getBinaryPath('node')
 
       try {
-        const { stdout } = await execAsync(`"${nodePath}" --version`)
-        const version = stdout.trim()
+        const { stdout } = await execAsync(`"${nodePath}" --version`, {
+          env: this.getEnhancedEnv()
+        } as any)
+
+        const version = stdout.toString().trim()
 
         return {
           available: true,
           message: `Node.js ${version} encontrado`,
-          path: nodePath
+          path: nodePath,
+          version
         }
       } catch {
         return {
@@ -267,7 +420,8 @@ class BinaryManager {
           path: nodePath
         }
       }
-    } catch {
+    } catch (error) {
+      console.error('Erro ao buscar Node.js:', error)
       return {
         available: false,
         message:
