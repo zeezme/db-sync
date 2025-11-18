@@ -182,23 +182,28 @@ class BinaryManager {
 
   private async getBundledPrismaPath(): Promise<string> {
     const isPackaged = process.resourcesPath !== undefined
+    let prismaCliPath: string
 
     if (isPackaged) {
-      const basePath = process.resourcesPath
-      const prismaCliPath = path.join(
-        basePath,
+      prismaCliPath = path.join(
+        process.resourcesPath,
         'app.asar.unpacked',
         'node_modules',
         'prisma',
         'build',
         'index.js'
       )
-
-      await fs.access(prismaCliPath)
-      return prismaCliPath
     } else {
-      return path.join(process.cwd(), 'node_modules', 'prisma', 'build', 'index.js')
+      prismaCliPath = path.join(process.cwd(), 'node_modules', 'prisma', 'build', 'index.js')
     }
+
+    await fs.access(prismaCliPath)
+
+    if (process.platform !== 'win32') {
+      return `node "${prismaCliPath}"`
+    }
+
+    return prismaCliPath
   }
 
   async verifyPostgresTools(): Promise<{ available: boolean; message: string; paths?: any }> {

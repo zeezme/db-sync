@@ -3,25 +3,27 @@ import { promisify } from 'util'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { tmpdir } from 'os'
+import { binaryManager } from '../helpers/binary-manager'
 
 const execAsync = promisify(exec)
-
-const prismaCmd = process.env.JEST_WORKER_ID
-  ? 'npx prisma'
-  : path.join(process.cwd(), 'node_modules', '.bin', 'prisma')
 
 export async function runPrismaMigrations(
   backendDir: string,
   targetUrl: string,
   logCallback: (log: string) => void
 ): Promise<void> {
+  const prismaCmd = await binaryManager.getBinaryPath('prisma')
+
   const tempDir = path.join(tmpdir(), 'db-sync')
   const tempMigrationDir = path.join(tempDir, 'prisma-migration')
 
   const log = (message: string) => {
     const timestamp = new Date().toISOString()
+
     const logMessage = `[${timestamp}] ${message}`
+
     console.log(logMessage)
+
     logCallback(logMessage)
   }
 

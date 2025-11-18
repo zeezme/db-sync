@@ -114,8 +114,9 @@ export async function restoreWithUpsert(
 
   try {
     if (!(await fs.stat(sqlFile).catch(() => null))) {
+      const pgRestorePath = await binaryManager.getBinaryPath('pg_restore')
       await executeCommand(
-        'pg_restore',
+        pgRestorePath,
         ['--data-only', '--file=' + sqlFile, dumpFile],
         { ...process.env },
         300000
