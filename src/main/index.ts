@@ -15,7 +15,6 @@ let logsBuffer: string[] = []
 let isSyncRunning = false
 let handlersRegistered = false
 
-// ====================== AUTO-UPDATE (SÓ EM PRODUÇÃO) ======================
 if (!is.dev) {
   const feedUrl = `https://update.electronjs.org/zeezme/db-sync/${process.platform}-${process.arch}/${app.getVersion()}`
 
@@ -49,7 +48,6 @@ if (!is.dev) {
   })
 }
 
-// ====================== SEU CÓDIGO ORIGINAL (100% INTACTO) ======================
 function registerHandlers(): void {
   if (handlersRegistered) {
     console.log('Handlers already registered, skipping...')
