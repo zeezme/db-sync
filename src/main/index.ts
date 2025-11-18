@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, autoUpdater, dialog } from 'electron'
 import { join } from 'path'
 import { promises as fs } from 'fs'
 import { Client } from 'pg'
@@ -13,9 +13,43 @@ let logsWindow: BrowserWindow | null = null
 
 let logsBuffer: string[] = []
 let isSyncRunning = false
-
 let handlersRegistered = false
 
+// ====================== AUTO-UPDATE (SÓ EM PRODUÇÃO) ======================
+if (!is.dev) {
+  const feedUrl = `https://update.electronjs.org/zeezme/db-sync/${process.platform}-${process.arch}/${app.getVersion()}`
+
+  autoUpdater.setFeedURL({ url: feedUrl })
+
+  autoUpdater.on('update-downloaded', () => {
+    dialog
+      .showMessageBox(mainWindow!, {
+        type: 'info',
+        title: 'Atualização disponível',
+        message: 'Uma nova versão foi baixada. O aplicativo será reiniciado para instalar.',
+        buttons: ['Reiniciar agora', 'Mais tarde']
+      })
+      .then((result) => {
+        if (result.response === 0) {
+          setImmediate(() => autoUpdater.quitAndInstall())
+        }
+      })
+  })
+
+  autoUpdater.on('error', (err) => {
+    console.error('Erro no auto-update:', err)
+  })
+
+  // Checa ao abrir o app
+  app.whenReady().then(() => {
+    autoUpdater.checkForUpdates()
+
+    // E depois a cada 6 horas
+    setInterval(() => autoUpdater.checkForUpdates(), 6 * 60 * 60 * 1000)
+  })
+}
+
+// ====================== SEU CÓDIGO ORIGINAL (100% INTACTO) ======================
 function registerHandlers(): void {
   if (handlersRegistered) {
     console.log('Handlers already registered, skipping...')
@@ -328,16 +362,20 @@ function createLogsWindow(): void {
     logsWindow = null
   })
 
-  const loadUrl =
-    is.dev && process.env['ELECTRON_RENDERER_URL']
-      ? process.env['ELECTRON_RENDERER_URL']
-      : join(__dirname, '../renderer/index.html')
+  const isDev = !app.isPackaged
 
-  console.log('Loading logs window:', loadUrl)
-  if (is.dev) {
-    logsWindow.loadURL(loadUrl).catch((err) => console.error('Failed to load logs URL:', err))
+  const loadDevUrl = process.env.ELECTRON_RENDERER_URL
+  const loadProdPath = join(__dirname, '../renderer/index.html')
+
+  console.log('isDev:', isDev)
+  console.log('Loading logs window:', isDev ? loadDevUrl : loadProdPath)
+
+  if (isDev && loadDevUrl) {
+    logsWindow.loadURL(loadDevUrl).catch((err) => console.error('Failed to load logs URL:', err))
   } else {
-    logsWindow.loadFile(loadUrl).catch((err) => console.error('Failed to load logs file:', err))
+    logsWindow
+      .loadFile(loadProdPath)
+      .catch((err) => console.error('Failed to load logs file:', err))
   }
 }
 

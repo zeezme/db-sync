@@ -58,6 +58,8 @@ export async function cleanupOldFiles(log: (message: string) => void): Promise<v
 
     if (cleanedCount > 0) {
       log(`Limpeza concluída: ${cleanedCount} arquivos temporários removidos`)
+    } else {
+      log(`Limpeza concluída (Nenhum arquivo antigo encontrado)`)
     }
   } catch (error) {
     log(`Erro na limpeza de arquivos temporários: ${error}`)

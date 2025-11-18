@@ -6,6 +6,10 @@ import { tmpdir } from 'os'
 
 const execAsync = promisify(exec)
 
+const prismaCmd = process.env.JEST_WORKER_ID
+  ? 'npx prisma'
+  : path.join(process.cwd(), 'node_modules', '.bin', 'prisma')
+
 export async function runPrismaMigrations(
   backendDir: string,
   targetUrl: string,
@@ -46,7 +50,7 @@ export async function runPrismaMigrations(
     log('  ✓ Migrations copiadas')
 
     log('Executando prisma migrate deploy...')
-    const { stdout, stderr } = await execAsync('npx prisma migrate deploy', {
+    const { stdout, stderr } = await execAsync(`${prismaCmd} migrate deploy`, {
       cwd: tempMigrationDir,
       env: {
         ...process.env,

@@ -11,6 +11,9 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
+  - node_modules/prisma/**
+  - node_modules/@prisma/**
+  - node_modules/.bin/prisma*
 win:
   executableName: db-sync
 nsis:
@@ -36,6 +39,10 @@ linux:
   icon: build/icons
   maintainer: electronjs.org
   category: Utility
+deb:
+  afterInstall: build/debian/postinst
+  fpm:
+    - "--after-install=build/debian/postinst"
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false

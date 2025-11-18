@@ -3,6 +3,7 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import { tmpdir } from 'os'
 import { getConnectionParams } from './connection'
+import { binaryManager } from '../helpers/binary-manager'
 
 export async function executeCommand(
   command: string,
@@ -48,7 +49,6 @@ export async function dumpTableData(
   await fs.mkdir(tempDir, { recursive: true })
 
   const dumpFile = path.join(tempDir, `${table}_${Date.now()}.dump`)
-
   const sourceParams = getConnectionParams(sourceUrl, sourceSSLEnabled)
 
   try {
@@ -83,8 +83,10 @@ export async function dumpTableData(
 
   log(`Executando pg_dump para "${table}"...`)
 
+  const pgDumpPath = await binaryManager.getBinaryPath('pg_dump')
+
   return new Promise((resolve, reject) => {
-    const dumpProcess: ChildProcess = spawn('pg_dump', args, { env })
+    const dumpProcess: ChildProcess = spawn(pgDumpPath, args, { env })
 
     const timeout = setTimeout(() => {
       dumpProcess.kill('SIGTERM')

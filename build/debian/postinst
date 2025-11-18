@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+
+if [ -f "/opt/db-sync/chrome-sandbox" ]; then
+    echo "Ajustando permissões do chrome-sandbox..."
+    chown root:root /opt/db-sync/chrome-sandbox
+    chmod 4755 /opt/db-sync/chrome-sandbox
+fi
+
+exit 0

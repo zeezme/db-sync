@@ -283,14 +283,27 @@ export class DatabaseSync {
           this.log(`✓ Triggers reabilitados em ${allTables.length} tabelas`)
         }
       }
-    } catch (error) {
+    } catch (error: any) {
+      const errorMessage = error?.message.toLowerCase()
+
+      if (
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('getaddrinfo') ||
+        errorMessage.includes('não foi possível conectar')
+      ) {
+        this.log(`Falha de Conexão ou Timeout: ${error.message}`)
+      }
+
       this.updateProgress('', 0, 0, 'error')
+
       this.log(`=== ERRO NA SINCRONIZAÇÃO: ${error} ===`)
+
       throw error
     } finally {
       if (targetClient) {
         await targetClient.end().catch(() => {})
       }
+
       this.isRunning = false
     }
   }

@@ -2,6 +2,16 @@ import * as fs from 'fs/promises'
 import { getConnectionParams, createClient } from './connection'
 import { executeCommand } from './dump'
 import { getCommonColumns } from './metadata'
+import { binaryManager } from '../helpers/binary-manager'
+
+async function safeUnlink(filePath: string, log: (message: string) => void): Promise<void> {
+  try {
+    await fs.unlink(filePath)
+    log(`Arquivo temporário excluído: ${filePath}`)
+  } catch {
+    //
+  }
+}
 
 export async function restoreTableData(
   table: string,
@@ -14,11 +24,13 @@ export async function restoreTableData(
 
   const sqlFile = dumpFile.replace('.dump', '.sql')
 
+  const pgRestorePath = await binaryManager.getBinaryPath('pg_restore')
+
   try {
     log(`Convertendo dump para SQL para "${table}"...`)
     await executeCommand(
-      'pg_restore',
-      ['--data-only', '--file=' + sqlFile, dumpFile],
+      pgRestorePath,
+      ['--data-only', `--file=${sqlFile}`, dumpFile],
       { ...process.env },
       300000
     )
@@ -27,9 +39,11 @@ export async function restoreTableData(
     let sqlContent = await fs.readFile(sqlFile, 'utf8')
     sqlContent = sqlContent.replace(/SET transaction_timeout = 0;\s*/g, '')
     await fs.writeFile(sqlFile, sqlContent, 'utf8')
-    log(`✓ SQL limpo salvo em ${sqlFile}`)
+    log(`SQL limpo salvo em ${sqlFile}`)
 
     log(`Restaurando dados para "${table}" com psql...`)
+
+    const psqlPath = await binaryManager.getBinaryPath('psql')
 
     const psqlArgs = [
       `--host=${targetParams.host}`,
@@ -38,7 +52,7 @@ export async function restoreTableData(
       `--dbname=${targetParams.database}`,
       '--no-password',
       '--single-transaction',
-      '--file=' + sqlFile
+      `--file=${sqlFile}`
     ]
 
     const psqlEnv: NodeJS.ProcessEnv = {
@@ -47,31 +61,41 @@ export async function restoreTableData(
       PGSSLMODE: targetParams.ssl ? 'require' : 'prefer'
     }
 
-    const { stdout, stderr } = await executeCommand('psql', psqlArgs, psqlEnv, 300000)
+    const { stdout, stderr } = await executeCommand(psqlPath, psqlArgs, psqlEnv, 300000)
     if (stdout) log(`[psql:stdout] ${stdout}`)
     if (stderr) log(`[psql:stderr] ${stderr}`)
 
     if (stderr && (stderr.includes('ERROR:') || stderr.includes('duplicate key'))) {
-      throw new Error(`Restore falhou com erros na transação`)
+      throw new Error(`Restore direto falhou (Erro psql). Tentando UPSERT...`)
     }
 
-    log(`✓ Restore concluído para "${table}"`)
+    log(`Restore concluído para "${table}"`)
 
-    await fs.unlink(sqlFile).catch(() => {})
-    await fs.unlink(dumpFile).catch(() => {})
+    await safeUnlink(sqlFile, log)
+    await safeUnlink(dumpFile, log)
   } catch (error: any) {
-    log(`Restore direto falhou para "${table}": ${error.message}`)
-    await fs.unlink(sqlFile).catch(() => {})
+    await safeUnlink(sqlFile, log)
 
-    try {
-      await restoreWithUpsert(table, dumpFile, targetUrl, targetSSLEnabled, log)
-      log(`✓ UPSERT concluído para "${table}"`)
-      await fs.unlink(dumpFile).catch(() => {})
-      return
-    } catch (upsertError: any) {
-      log(`UPSERT falhou para "${table}": ${upsertError.message}`)
-      await fs.unlink(dumpFile).catch(() => {})
-      throw new Error(`Todos os métodos de restauração falharam para "${table}"`)
+    if (
+      error.message.includes('duplicate key') ||
+      error.message.includes('Restore direto falhou')
+    ) {
+      log(`Tentando UPSERT para "${table}"...`)
+      try {
+        await restoreWithUpsert(table, dumpFile, targetUrl, targetSSLEnabled, log)
+        log(`UPSERT concluído para "${table}"`)
+
+        await safeUnlink(dumpFile, log)
+        return
+      } catch (upsertError: any) {
+        log(`UPSERT falhou para "${table}": ${upsertError.message}`)
+        await safeUnlink(dumpFile, log)
+        throw new Error(`Todos os métodos de restauração falharam para "${table}"`)
+      }
+    } else {
+      log(`Erro fatal no restore para "${table}": ${error.message}`)
+      await safeUnlink(dumpFile, log)
+      throw error
     }
   }
 }
@@ -85,186 +109,124 @@ export async function restoreWithUpsert(
 ): Promise<void> {
   const tempTable = `temp_${table}_${Date.now()}`
   const sqlFile = dumpFile.replace('.dump', '.sql')
-
   const client = await createClient(targetUrl, targetSSLEnabled)
+  let cleanupSuccessful = false
 
   try {
-    log(`Convertendo dump para SQL...`)
-    await executeCommand(
-      'pg_restore',
-      ['--data-only', '--file=' + sqlFile, dumpFile],
-      { ...process.env },
-      300000
-    )
-    log(`✓ Conversão para SQL concluída`)
+    if (!(await fs.stat(sqlFile).catch(() => null))) {
+      await executeCommand(
+        'pg_restore',
+        ['--data-only', '--file=' + sqlFile, dumpFile],
+        { ...process.env },
+        300000
+      )
+    }
 
-    // Note: Need to pass sourceUrl and sourceSSLEnabled here
-    // You'll need to add these as parameters to restoreWithUpsert
-    // For now, this is a placeholder that needs to be fixed in actual implementation
     const commonColumns = await getCommonColumns(
       table,
-      targetUrl, // This should be sourceUrl
       targetUrl,
-      targetSSLEnabled, // This should be sourceSSLEnabled
+      targetUrl,
+      targetSSLEnabled,
       targetSSLEnabled,
       log
     )
-
     if (commonColumns.length === 0) {
-      log(`✗ Pulando "${table}" - nenhuma coluna comum com o target`)
+      log(`Aviso: Nenhuma coluna comum encontrada para "${table}".`)
       return
     }
 
-    // Get primary key from metadata
-    const pkResult = await client.query(
+    const pkRes = await client.query(
       `
-      SELECT a.attname as column_name
-      FROM pg_index i
+      SELECT a.attname FROM pg_index i
       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-      WHERE i.indrelid = $1::regclass AND i.indisprimary
-      LIMIT 1
+      WHERE i.indrelid = $1::regclass AND i.indisprimary LIMIT 1
     `,
       [`"${table}"`]
     )
-    const primaryKey = pkResult.rows[0]?.column_name || 'id'
+    const primaryKey = pkRes.rows[0]?.attname || 'id'
 
     if (!commonColumns.includes(primaryKey)) {
-      log(`✗ Pulando "${table}" - chave primária "${primaryKey}" não existe no target`)
-      return
+      throw new Error(
+        `Chave primária "${primaryKey}" não encontrada nas colunas comuns de "${table}".`
+      )
     }
 
-    const commonColumnsList = commonColumns.map((col) => `"${col}"`).join(', ')
-    await client.query(`
-    DROP TABLE IF EXISTS "${tempTable}" CASCADE;
-    CREATE TEMPORARY TABLE "${tempTable}" AS
-    SELECT ${commonColumnsList} FROM "${table}" WHERE false;
-  `)
-    log(`✓ Tabela temporária "${tempTable}" criada com ${commonColumns.length} colunas`)
+    const colsList = commonColumns.map((c) => `"${c}"`).join(', ')
 
-    log(`Processando arquivo SQL...`)
-    const sqlContent = await fs.readFile(sqlFile, 'utf8')
+    await client.query(`DROP TABLE IF EXISTS "${tempTable}" CASCADE`)
+    await client.query(`CREATE TEMP TABLE "${tempTable}" (LIKE "${table}" INCLUDING ALL)`)
 
-    const copyBlocks = sqlContent.split('COPY ')
-    if (copyBlocks.length < 2) {
-      log(`✗ Não encontrou comando COPY`)
-      return
-    }
+    await client.query(`INSERT INTO "${tempTable}" SELECT ${colsList} FROM "${table}"`)
 
-    const copyBlock = 'COPY ' + copyBlocks[1].split('\n\\.')[0] + '\n\\.'
+    const sql = await fs.readFile(sqlFile, 'utf8')
 
-    const firstLineEnd = copyBlock.indexOf('\n')
-    if (firstLineEnd === -1) {
-      log(`✗ Formato COPY inválido`)
-      return
-    }
+    const match = sql.match(/COPY .*?\(([\s\S]*?)\)\s+FROM stdin;\n([\s\S]*?)\n\\\./)
 
-    const headerLine = copyBlock.substring(0, firstLineEnd)
+    if (!match) throw new Error('Dados COPY não encontrados no arquivo SQL.')
 
-    const columnsMatch = headerLine.match(/\(([^)]+)\)/)
-    if (!columnsMatch) {
-      log(`✗ Não conseguiu extrair colunas`)
-      return
-    }
-
-    const copyColumnNames = columnsMatch[1].split(',').map((col) => col.trim().replace(/"/g, ''))
-
-    log(`📋 ${copyColumnNames.length} colunas no COPY`)
-
-    const columnsWithNulls = commonColumns.filter((col) => !copyColumnNames.includes(col))
-    if (columnsWithNulls.length > 0) {
-      log(`⚠️  Colunas que receberão NULL (não estão no dump): ${columnsWithNulls.join(', ')}`)
-    }
-
-    const columnMapping: number[] = []
-    commonColumns.forEach((commonCol) => {
-      const positionInCopy = copyColumnNames.indexOf(commonCol)
-      columnMapping.push(positionInCopy)
-    })
-
-    const dataStart = copyBlock.indexOf('\n') + 1
-    const dataEnd = copyBlock.lastIndexOf('\n\\.')
-    if (dataStart >= dataEnd) {
-      log(`✗ Não encontrou dados`)
-      return
-    }
-
-    const dataContent = copyBlock.substring(dataStart, dataEnd)
-    const dataLines = dataContent
+    const copyCols = match[1].split(',').map((c) => c.trim().replace(/"/g, ''))
+    const dataLines = match[2]
       .split('\n')
-      .filter((line) => line.trim() && !line.startsWith('\\'))
-      .map((line) => line.split('\t'))
+      .filter((l) => l.trim() && !l.startsWith('\\'))
+      .map((l) => l.split('\t'))
 
-    log(`📊 ${dataLines.length} registros encontrados`)
+    const onlyInSource = copyCols.filter((c) => !commonColumns.includes(c))
+    const onlyInTarget = commonColumns.filter((c) => !copyCols.includes(c))
+    if (onlyInSource.length) log(`Colunas apenas no SOURCE (ignoradas): ${onlyInSource.join(', ')}`)
+    if (onlyInTarget.length) log(`Colunas apenas no TARGET (mantidas): ${onlyInTarget.join(', ')}`)
 
-    if (dataLines.length === 0) {
-      log(`✗ Nenhum dado`)
-      return
-    }
-
-    log(`Inserindo dados...`)
-    let successfulInserts = 0
-
-    const batchSize = 1000
-
-    for (let i = 0; i < dataLines.length; i += batchSize) {
-      const batch = dataLines.slice(i, i + batchSize)
-
-      const batchPromises = batch.map(async (lineValues) => {
-        try {
-          const mappedValues = columnMapping.map((copyIndex) => {
-            if (copyIndex === -1 || copyIndex >= lineValues.length) return null
-            const value = lineValues[copyIndex]
-            return value === '\\N' ? null : value
-          })
-
-          const placeholders = commonColumns.map((_, idx) => `$${idx + 1}`).join(', ')
-          const insertSQL = `INSERT INTO "${tempTable}" (${commonColumnsList}) VALUES (${placeholders})`
-
-          await client.query(insertSQL, mappedValues)
-          return true
-        } catch {
-          return false
-        }
-      })
-
-      const batchResults = await Promise.all(batchPromises)
-      successfulInserts += batchResults.filter(Boolean).length
-
-      if (i > 0 && i % 5000 === 0) {
-        log(`📦 ${i}/${dataLines.length} registros`)
-      }
-    }
-
-    log(`✅ ${successfulInserts}/${dataLines.length} registros carregados`)
-
-    if (successfulInserts === 0) {
-      log(`❌ Nenhum registro inserido`)
-      return
-    }
-
-    log(`Executando UPSERT...`)
-    const upsertSQL = `
-    INSERT INTO "${table}" (${commonColumnsList})
-    SELECT ${commonColumnsList} FROM "${tempTable}"
-    ON CONFLICT ("${primaryKey}") DO UPDATE SET
-      ${commonColumns
-        .filter((c) => c !== primaryKey)
+    const tempUpdatable =
+      commonColumns
+        .filter((c) => c !== primaryKey && copyCols.includes(c))
         .map((c) => `"${c}" = EXCLUDED."${c}"`)
-        .join(', ')};
-  `
+        .join(', ') || `"${primaryKey}" = EXCLUDED."${primaryKey}"`
+
+    for (let i = 0; i < dataLines.length; i += 1000) {
+      const batch = dataLines.slice(i, i + 1000)
+      await Promise.all(
+        batch.map(async (line) => {
+          const values = commonColumns.map((col) => {
+            const idx = copyCols.indexOf(col)
+
+            if (idx === -1) return null
+            const v = line[idx]
+            return v === '\\N' ? null : v
+          })
+          const placeholders = values.map((_, i) => `$${i + 1}`).join(', ')
+
+          await client.query(
+            `INSERT INTO "${tempTable}" (${colsList}) VALUES (${placeholders}) 
+            ON CONFLICT ("${primaryKey}") DO UPDATE SET ${tempUpdatable}`,
+            values
+          )
+        })
+      )
+    }
+
+    const updatable = commonColumns
+      .filter((c) => c !== primaryKey && copyCols.includes(c))
+      .map((c) => `"${c}" = EXCLUDED."${c}"`)
+      .join(', ')
+
+    const upsertSQL = `
+      INSERT INTO "${table}" (${colsList})
+      SELECT ${colsList} FROM "${tempTable}"
+      ON CONFLICT ("${primaryKey}") DO UPDATE SET
+      ${updatable || `"${primaryKey}" = EXCLUDED."${primaryKey}"`}
+    `
 
     const result = await client.query(upsertSQL)
-    log(`🎉 ${result.rowCount} linhas sincronizadas`)
+    log(`${result.rowCount} linhas sincronizadas corretamente`)
+    cleanupSuccessful = true
   } catch (error: any) {
-    log(`💥 Falha: ${error.message}`)
+    log(`UPSERT falhou: ${error.message}`)
     throw error
   } finally {
-    try {
-      await client.query(`DROP TABLE IF EXISTS "${tempTable}"`).catch(() => {})
-    } catch {
-      //
-    }
+    await client.query(`DROP TABLE IF EXISTS "${tempTable}"`).catch(() => {})
     await client.end().catch(() => {})
-    await fs.unlink(sqlFile).catch(() => {})
+    if (cleanupSuccessful) {
+      await safeUnlink(sqlFile, log)
+      await safeUnlink(dumpFile, log)
+    }
   }
 }

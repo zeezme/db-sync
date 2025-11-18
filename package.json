@@ -17,10 +17,14 @@
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",
-    "build:mac": "electron-vite build && electron-builder --mac",
-    "build:linux": "electron-vite build && electron-builder --linux"
+    "build:mac": "npm run build && electron-builder --mac",
+    "build:linux": "npm run build && electron-builder --linux",
+    "release": "npm run build && electron-builder --publish always",
+    "release:dry": "npm run build && electron-builder --publish never"
   },
   "dependencies": {
+    "prisma": "^5.x.x",
+    "@prisma/client": "^5.x.x",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@hookform/resolvers": "^5.2.2",
@@ -59,6 +63,7 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
+    "pkg": "^5.8.1",
     "postcss": "^8.5.6",
     "prettier": "^3.6.2",
     "react": "^19.1.1",
@@ -67,5 +72,75 @@
     "tw-animate-css": "^1.4.0",
     "typescript": "^5.9.2",
     "vite": "^7.1.6"
+  },
+  "build": {
+    "appId": "com.electron.app",
+    "productName": "db-sync",
+    "directories": {
+      "buildResources": "build"
+    },
+    "files": [
+      "!**/.vscode/*",
+      "!src/*",
+      "!electron.vite.config.{js,ts,mjs,cjs}",
+      "!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}",
+      "!{.env,.env.*,.npmrc,pnpm-lock.yaml}",
+      "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}"
+    ],
+    "asarUnpack": [
+      "resources/**",
+      "node_modules/prisma/**",
+      "node_modules/@prisma/**",
+      "node_modules/.bin/prisma*"
+    ],
+    "win": {
+      "executableName": "db-sync"
+    },
+    "nsis": {
+      "artifactName": "${name}-${version}-setup.${ext}",
+      "shortcutName": "${productName}",
+      "uninstallDisplayName": "${productName}",
+      "createDesktopShortcut": "always"
+    },
+    "mac": {
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSCameraUsageDescription": "Application requests access to the device's camera.",
+        "NSMicrophoneUsageDescription": "Application requests access to the device's microphone.",
+        "NSDocumentsFolderUsageDescription": "Application requests access to the user's Documents folder.",
+        "NSDownloadsFolderUsageDescription": "Application requests access to the user's Downloads folder."
+      },
+      "notarize": false
+    },
+    "dmg": {
+      "artifactName": "${name}-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "snap",
+        "deb"
+      ],
+      "icon": "build/icons",
+      "maintainer": "electronjs.org",
+      "category": "Utility"
+    },
+    "deb": {
+      "afterInstall": "build/debian/postinst",
+      "fpm": [
+        "--after-install=build/debian/postinst"
+      ]
+    },
+    "appImage": {
+      "artifactName": "${name}-${version}.${ext}"
+    },
+    "npmRebuild": false,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "zeezme",
+        "repo": "db-sync"
+      }
+    ]
   }
 }
